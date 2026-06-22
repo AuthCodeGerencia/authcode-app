@@ -1,0 +1,35 @@
+{
+  "expo": {
+    "name": "Authcode",
+    "slug": "authcode-app",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#0f0f0f"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "appleTeamId": "87DK3Z664S",
+      "bundleIdentifier": "com.authcodetechnologies.authcodeapp",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.authcodetechnologies.authcodeapp"
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "313a7137-7dd3-4888-bef5-2805d7f5fac2"
+      }
+    },
+    "owner": "authcode"
+  }
+}
