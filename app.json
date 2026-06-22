@@ -2,7 +2,7 @@
   "expo": {
     "name": "Authcode",
     "slug": "authcode-app",
-    "version": "0.1.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "splash": {

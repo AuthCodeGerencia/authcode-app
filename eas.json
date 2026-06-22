@@ -7,18 +7,31 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_CONVEX_URL": "https://unique-parakeet-602.convex.cloud",
+        "NEXT_PUBLIC_CONVEX_SITE_URL": "https://unique-parakeet-602.convex.site"
+      },
       "ios": {
         "simulator": true
       }
     },
     "preview": {
       "distribution": "internal",
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_CONVEX_URL": "https://unique-parakeet-602.convex.cloud",
+        "NEXT_PUBLIC_CONVEX_SITE_URL": "https://unique-parakeet-602.convex.site"
+      },
       "ios": {
         "resourceClass": "m-medium"
       }
     },
     "production": {
       "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_CONVEX_URL": "https://unique-parakeet-602.convex.cloud",
+        "NEXT_PUBLIC_CONVEX_SITE_URL": "https://unique-parakeet-602.convex.site"
+      },
       "ios": {
         "resourceClass": "m-medium"
       }
