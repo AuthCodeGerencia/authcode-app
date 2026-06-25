@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { ConvexReactClient } from "convex/react";
+import * as DocumentPicker from "expo-document-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -54,9 +55,10 @@ type Project = {
   band: "critical" | "risk" | "steady" | "healthy";
   tasks: { total: number; pending: number; overdue: number; dueSoon: number };
   url: string | null;
+  isFavorite?: boolean;
 };
 
-type ProjectTab = "todos" | string;
+type ProjectTab = "todos" | "favoritos" | string;
 
 type TaskStatus =
   | "idea"
@@ -66,6 +68,8 @@ type TaskStatus =
   | "qa"
   | "produccion"
   | "completada";
+
+type TaskPriority = "alta" | "media" | "baja";
 
 type Task = {
   id: Id<"tareas">;
@@ -92,6 +96,26 @@ type ProjectPhase = {
   name: string;
 };
 
+type ProfileDetail = {
+  id?: Id<"profile">;
+  _id?: Id<"profile">;
+  proyectos_favoritos?: Id<"proyectos">[];
+};
+
+type PickedAttachment = {
+  name: string;
+  uri: string;
+  mimeType?: string;
+  size?: number;
+};
+
+type TaskAttachment = {
+  id?: Id<"_storage">;
+  storageId?: Id<"_storage">;
+  name: string;
+  url?: string | null;
+};
+
 type NotificationItem = {
   id: Id<"notificaciones">;
   type: string;
@@ -110,8 +134,9 @@ type TaskDetail = {
   description: string;
   status: TaskStatus;
   statusLabel: string;
-  priority: "alta" | "media" | "baja" | null;
+  priority: TaskPriority | null;
   tag: string | null;
+  phaseIndex?: number | null;
   dueDate: string;
   phaseName: string;
   project: {
@@ -120,7 +145,7 @@ type TaskDetail = {
     company: string;
   };
   owners: Array<{ id: Id<"profile">; name: string; email: string }>;
-  attachments: Array<{ name: string }>;
+  attachments: TaskAttachment[];
   comments: Array<{
     id: Id<"comentariosTareas">;
     content: string;
@@ -140,11 +165,69 @@ const TASK_STATUS_OPTIONS: Array<{ key: TaskStatus; label: string }> = [
   { key: "completada", label: "Completada" },
 ];
 
-const PRIORITY_OPTIONS: Array<{ key: "alta" | "media" | "baja"; label: string }> = [
+const PRIORITY_OPTIONS: Array<{ key: TaskPriority; label: string }> = [
   { key: "alta", label: "Alta" },
   { key: "media", label: "Media" },
   { key: "baja", label: "Baja" },
 ];
+
+async function pickAttachments() {
+  const result = await DocumentPicker.getDocumentAsync({
+    copyToCacheDirectory: true,
+    multiple: true,
+  });
+
+  if (result.canceled) return [];
+
+  return result.assets.map((asset) => ({
+    mimeType: asset.mimeType,
+    name: asset.name,
+    size: asset.size,
+    uri: asset.uri,
+  }));
+}
+
+async function uploadPickedAttachments(
+  attachments: PickedAttachment[],
+  createUploadUrl: () => Promise<string>,
+) {
+  const storageIds: Id<"_storage">[] = [];
+  const names: string[] = [];
+
+  for (const attachment of attachments) {
+    const uploadUrl = await createUploadUrl();
+    const fileResponse = await fetch(attachment.uri);
+    const blob = await fileResponse.blob();
+    const uploadResponse = await fetch(uploadUrl, {
+      body: blob,
+      headers: {
+        "Content-Type": attachment.mimeType ?? "application/octet-stream",
+      },
+      method: "POST",
+    });
+
+    if (!uploadResponse.ok) {
+      throw new Error(`No se pudo subir ${attachment.name}.`);
+    }
+
+    const upload = (await uploadResponse.json()) as { storageId: Id<"_storage"> };
+    storageIds.push(upload.storageId);
+    names.push(attachment.name);
+  }
+
+  return { names, storageIds };
+}
+
+function formatFileSize(size?: number) {
+  if (size == null) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function taskAttachmentId(attachment: TaskAttachment) {
+  return attachment.id ?? attachment.storageId ?? null;
+}
 
 function useSession() {
   const [user, setUser] = useState<SessionUser | null>(null);
@@ -289,12 +372,27 @@ function LoginScreen({ onLogin }: { onLogin: (user: SessionUser) => Promise<void
 
 function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Promise<void> }) {
   const result = useQuery(api.mobile.getProjectsOverview, { profileId: user.id });
+  const profileResult = useQuery(api.profile.getProfileById, { id: user.id }) as
+    | ProfileDetail
+    | undefined;
   const notificationsResult = useQuery(api.mobile.getNotifications, {
     profileId: user.id,
     limit: 40,
   });
   const markNotificationRead = useMutation(api.mobile.markNotificationRead);
   const projects = (result?.projects ?? []) as Project[];
+  const favoriteProjectIds = useMemo(
+    () => new Set(profileResult?.proyectos_favoritos ?? []),
+    [profileResult?.proyectos_favoritos],
+  );
+  const projectsWithFavorites = useMemo(
+    () =>
+      projects.map((project) => ({
+        ...project,
+        isFavorite: project.isFavorite ?? favoriteProjectIds.has(project.id),
+      })),
+    [favoriteProjectIds, projects],
+  );
   const loading = result === undefined;
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<ProjectTab>("todos");
@@ -305,21 +403,27 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
   const [notificationsOpen, setNotificationsOpen] = useState(false);
 
   const projectTabs = useMemo(() => {
-    const phases = [...new Set(projects.map((project) => project.phase))];
+    const phases = [...new Set(projectsWithFavorites.map((project) => project.phase))];
     return [
-      { key: "todos" as ProjectTab, label: "Todos", count: projects.length },
+      { key: "todos" as ProjectTab, label: "Todos", count: projectsWithFavorites.length },
+      {
+        key: "favoritos" as ProjectTab,
+        label: "Favoritos",
+        count: projectsWithFavorites.filter((project) => project.isFavorite).length,
+      },
       ...phases.map((phase) => ({
         key: phase,
         label: phase,
-        count: projects.filter((project) => project.phase === phase).length,
+        count: projectsWithFavorites.filter((project) => project.phase === phase).length,
       })),
     ];
-  }, [projects]);
+  }, [projectsWithFavorites]);
 
   const filteredProjects = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return projects.filter((project) => {
-      const byTab = tab === "todos" || project.phase === tab;
+    return projectsWithFavorites.filter((project) => {
+      const byTab =
+        tab === "todos" || (tab === "favoritos" ? project.isFavorite : project.phase === tab);
       const bySearch =
         term.length === 0 ||
         project.name.toLowerCase().includes(term) ||
@@ -327,16 +431,16 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
         project.phase.toLowerCase().includes(term);
       return byTab && bySearch;
     });
-  }, [projects, search, tab]);
+  }, [projectsWithFavorites, search, tab]);
 
   const stats = useMemo(
     () => ({
-      total: projects.length,
-      risk: projects.filter((p) => p.band === "risk").length,
-      critical: projects.filter((p) => p.band === "critical").length,
-      done: projects.filter((p) => p.percent >= 100).length,
+      total: projectsWithFavorites.length,
+      risk: projectsWithFavorites.filter((p) => p.band === "risk").length,
+      critical: projectsWithFavorites.filter((p) => p.band === "critical").length,
+      done: projectsWithFavorites.filter((p) => p.percent >= 100).length,
     }),
-    [projects],
+    [projectsWithFavorites],
   );
 
   if (selectedProject) {
@@ -427,7 +531,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
             <ActivityIndicator color="#111" />
             <Text style={styles.stateText}>Cargando proyectos...</Text>
           </View>
-        ) : projects.length === 0 ? (
+        ) : projectsWithFavorites.length === 0 ? (
           <View style={styles.stateCard}>
             <Ionicons name="folder-open-outline" size={34} color="#68707b" />
             <Text style={styles.emptyTitle}>No hay proyectos visibles</Text>
@@ -460,7 +564,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
             profileId: user.id,
             notificationId: notification.id,
           }).catch(() => {});
-          const project = projects.find((item) => item.id === notification.projectId);
+          const project = projectsWithFavorites.find((item) => item.id === notification.projectId);
           if (project) {
             setNotificationsOpen(false);
             setSelectedProject({
@@ -504,6 +608,11 @@ function ProjectCard({ project, onPress }: { project: Project; onPress: () => vo
           <Text numberOfLines={1} style={styles.company}>{project.company}</Text>
           <Text numberOfLines={2} style={styles.projectName}>{project.name}</Text>
         </View>
+        {project.isFavorite ? (
+          <View style={styles.favoriteBadge}>
+            <Ionicons name="star" size={17} color="#111" />
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.metaRow}>
@@ -553,6 +662,212 @@ function Metric({
   );
 }
 
+function TaskFormFields({
+  title,
+  onTitleChange,
+  description,
+  onDescriptionChange,
+  status,
+  onStatusChange,
+  priority,
+  onPriorityChange,
+  tag,
+  onTagChange,
+  dueDate,
+  onDueDateChange,
+  phaseIndex,
+  onPhaseIndexChange,
+  ownerIds,
+  onOwnerIdsChange,
+  phases,
+  members,
+  statusLabel = "Estado",
+}: {
+  title: string;
+  onTitleChange: (value: string) => void;
+  description: string;
+  onDescriptionChange: (value: string) => void;
+  status: TaskStatus;
+  onStatusChange: (value: TaskStatus) => void;
+  priority: TaskPriority | null;
+  onPriorityChange: (value: TaskPriority | null) => void;
+  tag: string;
+  onTagChange: (value: string) => void;
+  dueDate: string;
+  onDueDateChange: (value: string) => void;
+  phaseIndex: number | null;
+  onPhaseIndexChange: (value: number | null) => void;
+  ownerIds: Id<"profile">[];
+  onOwnerIdsChange: (value: Id<"profile">[]) => void;
+  phases: ProjectPhase[];
+  members: ProjectMember[];
+  statusLabel?: string;
+}) {
+  return (
+    <>
+      <View style={styles.field}>
+        <Text style={styles.label}>Título</Text>
+        <View style={styles.inputShell}>
+          <Ionicons name="create-outline" size={19} color="#7a8088" />
+          <TextInput
+            onChangeText={onTitleChange}
+            placeholder="Nombre de la tarea"
+            placeholderTextColor="#9aa0a8"
+            style={styles.input}
+            value={title}
+          />
+        </View>
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Descripción</Text>
+        <TextInput
+          multiline
+          onChangeText={onDescriptionChange}
+          placeholder="Detalle breve de lo que se debe hacer"
+          placeholderTextColor="#9aa0a8"
+          style={styles.textarea}
+          value={description}
+        />
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>{statusLabel}</Text>
+        <View style={styles.statusGrid}>
+          {TASK_STATUS_OPTIONS.map((item) => (
+            <Pressable
+              key={item.key}
+              onPress={() => onStatusChange(item.key)}
+              style={[
+                styles.statusOption,
+                status === item.key && styles.statusOptionActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.statusOptionText,
+                  status === item.key && styles.statusOptionTextActive,
+                ]}
+              >
+                {item.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Prioridad</Text>
+        <View style={styles.statusGrid}>
+          {PRIORITY_OPTIONS.map((item) => (
+            <Pressable
+              key={item.key}
+              onPress={() => onPriorityChange(priority === item.key ? null : item.key)}
+              style={[
+                styles.statusOption,
+                priority === item.key && styles.statusOptionActive,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.statusOptionText,
+                  priority === item.key && styles.statusOptionTextActive,
+                ]}
+              >
+                {item.label}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Etiqueta</Text>
+        <View style={styles.inputShell}>
+          <Ionicons name="pricetag-outline" size={19} color="#7a8088" />
+          <TextInput
+            onChangeText={onTagChange}
+            placeholder="Web, App, portal..."
+            placeholderTextColor="#9aa0a8"
+            style={styles.input}
+            value={tag}
+          />
+        </View>
+      </View>
+
+      <View style={styles.field}>
+        <Text style={styles.label}>Fecha de entrega</Text>
+        <View style={styles.inputShell}>
+          <Ionicons name="calendar-outline" size={19} color="#7a8088" />
+          <TextInput
+            keyboardType="numbers-and-punctuation"
+            onChangeText={onDueDateChange}
+            placeholder="YYYY-MM-DD"
+            placeholderTextColor="#9aa0a8"
+            style={styles.input}
+            value={dueDate}
+          />
+        </View>
+      </View>
+
+      {phases.length > 0 ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>Fase</Text>
+          <View style={styles.statusGrid}>
+            {phases.map((phase) => (
+              <Pressable
+                key={phase.index}
+                onPress={() => onPhaseIndexChange(phase.index)}
+                style={[
+                  styles.statusOption,
+                  phaseIndex === phase.index && styles.statusOptionActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.statusOptionText,
+                    phaseIndex === phase.index && styles.statusOptionTextActive,
+                  ]}
+                >
+                  {phase.name}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      ) : null}
+
+      {members.length > 0 ? (
+        <View style={styles.field}>
+          <Text style={styles.label}>Encargados</Text>
+          <View style={styles.statusGrid}>
+            {members.map((member) => {
+              const active = ownerIds.includes(member.id);
+              return (
+                <Pressable
+                  key={member.id}
+                  onPress={() =>
+                    onOwnerIdsChange(
+                      active
+                        ? ownerIds.filter((id) => id !== member.id)
+                        : [...ownerIds, member.id],
+                    )
+                  }
+                  style={[styles.statusOption, active && styles.statusOptionActive]}
+                >
+                  <Text style={[styles.statusOptionText, active && styles.statusOptionTextActive]}>
+                    {member.name}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      ) : null}
+    </>
+  );
+}
+
 function TasksScreen({
   user,
   project,
@@ -574,7 +889,7 @@ function TasksScreen({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [newStatus, setNewStatus] = useState<TaskStatus>("pendiente");
-  const [priority, setPriority] = useState<"alta" | "media" | "baja" | null>(null);
+  const [priority, setPriority] = useState<TaskPriority | null>(null);
   const [tag, setTag] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [phaseIndex, setPhaseIndex] = useState<number | null>(null);
@@ -714,7 +1029,9 @@ function TasksScreen({
       </ScrollView>
 
       <TaskDetailModal
+        members={members}
         onClose={() => setSelectedTaskId(null)}
+        phases={phases}
         taskId={selectedTaskId}
         user={user}
       />
@@ -730,165 +1047,27 @@ function TasksScreen({
           </View>
 
           <ScrollView contentContainerStyle={styles.modalContent}>
-            <View style={styles.field}>
-              <Text style={styles.label}>Título</Text>
-              <View style={styles.inputShell}>
-                <Ionicons name="create-outline" size={19} color="#7a8088" />
-                <TextInput
-                  onChangeText={setTitle}
-                  placeholder="Nombre de la tarea"
-                  placeholderTextColor="#9aa0a8"
-                  style={styles.input}
-                  value={title}
-                />
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Descripción</Text>
-              <TextInput
-                multiline
-                onChangeText={setDescription}
-                placeholder="Detalle breve de lo que se debe hacer"
-                placeholderTextColor="#9aa0a8"
-                style={styles.textarea}
-                value={description}
-              />
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Estado inicial</Text>
-              <View style={styles.statusGrid}>
-                {TASK_STATUS_OPTIONS.map((item) => (
-                  <Pressable
-                    key={item.key}
-                    onPress={() => setNewStatus(item.key)}
-                    style={[
-                      styles.statusOption,
-                      newStatus === item.key && styles.statusOptionActive,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.statusOptionText,
-                        newStatus === item.key && styles.statusOptionTextActive,
-                      ]}
-                    >
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Prioridad</Text>
-              <View style={styles.statusGrid}>
-                {PRIORITY_OPTIONS.map((item) => (
-                  <Pressable
-                    key={item.key}
-                    onPress={() => setPriority(priority === item.key ? null : item.key)}
-                    style={[
-                      styles.statusOption,
-                      priority === item.key && styles.statusOptionActive,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.statusOptionText,
-                        priority === item.key && styles.statusOptionTextActive,
-                      ]}
-                    >
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                ))}
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Etiqueta</Text>
-              <View style={styles.inputShell}>
-                <Ionicons name="pricetag-outline" size={19} color="#7a8088" />
-                <TextInput
-                  onChangeText={setTag}
-                  placeholder="Web, App, portal..."
-                  placeholderTextColor="#9aa0a8"
-                  style={styles.input}
-                  value={tag}
-                />
-              </View>
-            </View>
-
-            <View style={styles.field}>
-              <Text style={styles.label}>Fecha de entrega</Text>
-              <View style={styles.inputShell}>
-                <Ionicons name="calendar-outline" size={19} color="#7a8088" />
-                <TextInput
-                  keyboardType="numbers-and-punctuation"
-                  onChangeText={setDueDate}
-                  placeholder="YYYY-MM-DD"
-                  placeholderTextColor="#9aa0a8"
-                  style={styles.input}
-                  value={dueDate}
-                />
-              </View>
-            </View>
-
-            {phases.length > 0 ? (
-              <View style={styles.field}>
-                <Text style={styles.label}>Fase</Text>
-                <View style={styles.statusGrid}>
-                  {phases.map((phase) => (
-                    <Pressable
-                      key={phase.index}
-                      onPress={() => setPhaseIndex(phase.index)}
-                      style={[
-                        styles.statusOption,
-                        phaseIndex === phase.index && styles.statusOptionActive,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.statusOptionText,
-                          phaseIndex === phase.index && styles.statusOptionTextActive,
-                        ]}
-                      >
-                        {phase.name}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-            ) : null}
-
-            {members.length > 0 ? (
-              <View style={styles.field}>
-                <Text style={styles.label}>Encargados</Text>
-                <View style={styles.statusGrid}>
-                  {members.map((member) => {
-                    const active = ownerIds.includes(member.id);
-                    return (
-                      <Pressable
-                        key={member.id}
-                        onPress={() =>
-                          setOwnerIds((current) =>
-                            current.includes(member.id)
-                              ? current.filter((id) => id !== member.id)
-                              : [...current, member.id],
-                          )
-                        }
-                        style={[styles.statusOption, active && styles.statusOptionActive]}
-                      >
-                        <Text style={[styles.statusOptionText, active && styles.statusOptionTextActive]}>
-                          {member.name}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              </View>
-            ) : null}
+            <TaskFormFields
+              description={description}
+              dueDate={dueDate}
+              members={members}
+              onDescriptionChange={setDescription}
+              onDueDateChange={setDueDate}
+              onOwnerIdsChange={setOwnerIds}
+              onPhaseIndexChange={setPhaseIndex}
+              onPriorityChange={setPriority}
+              onStatusChange={setNewStatus}
+              onTagChange={setTag}
+              onTitleChange={setTitle}
+              ownerIds={ownerIds}
+              phaseIndex={phaseIndex}
+              phases={phases}
+              priority={priority}
+              status={newStatus}
+              statusLabel="Estado inicial"
+              tag={tag}
+              title={title}
+            />
 
             <Pressable
               disabled={saving}
@@ -953,32 +1132,96 @@ function TaskRow({ task, onPress }: { task: Task; onPress: () => void }) {
 function TaskDetailModal({
   user,
   taskId,
+  phases,
+  members,
   onClose,
 }: {
   user: SessionUser;
   taskId: Id<"tareas"> | null;
+  phases: ProjectPhase[];
+  members: ProjectMember[];
   onClose: () => void;
 }) {
   const detail = useQuery(
     api.mobile.getTaskDetail,
     taskId ? { profileId: user.id, taskId } : "skip",
   ) as TaskDetail | null | undefined;
-  const addComment = useMutation(api.mobile.createTaskComment);
+  const addComment = useMutation(api.comentarioTareas.createComentarioTarea);
+  const generateCommentUploadUrl = useMutation(api.comentarioTareas.generateUploadUrl);
+  const generateTaskUploadUrl = useMutation(api.tareas.generateUploadUrl);
+  const addTaskAttachments = useMutation(api.tareas.addAdjuntosToTarea);
+  const removeTaskAttachment = useMutation(api.tareas.removeAdjuntoFromTarea);
   const updateTask = useMutation(api.mobile.updateProjectTask);
   const [comment, setComment] = useState("");
+  const [commentAttachments, setCommentAttachments] = useState<PickedAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState<TaskStatus | null>(null);
+  const [uploadingTaskAttachments, setUploadingTaskAttachments] = useState(false);
+  const [removingTaskAttachmentId, setRemovingTaskAttachmentId] =
+    useState<Id<"_storage"> | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editStatus, setEditStatus] = useState<TaskStatus>("pendiente");
+  const [editPriority, setEditPriority] = useState<TaskPriority | null>(null);
+  const [editTag, setEditTag] = useState("");
+  const [editDueDate, setEditDueDate] = useState("");
+  const [editPhaseIndex, setEditPhaseIndex] = useState<number | null>(null);
+  const [editOwnerIds, setEditOwnerIds] = useState<Id<"profile">[]>([]);
+
+  useEffect(() => {
+    if (!taskId) {
+      setComment("");
+      setCommentAttachments([]);
+      setEditOpen(false);
+    }
+  }, [taskId]);
+
+  useEffect(() => {
+    if (!editOpen || detail == null) return;
+    const currentPhase = phases.find((phase) => phase.name === detail.phaseName);
+    setEditTitle(detail.title);
+    setEditDescription(detail.description ?? "");
+    setEditStatus(detail.status);
+    setEditPriority(detail.priority);
+    setEditTag(detail.tag ?? "");
+    setEditDueDate(detail.dueDate === "Sin fecha" ? "" : detail.dueDate);
+    setEditPhaseIndex(detail.phaseIndex ?? currentPhase?.index ?? null);
+    setEditOwnerIds(detail.owners.map((owner) => owner.id));
+  }, [detail, editOpen, phases]);
+
+  const pickCommentAttachments = useCallback(async () => {
+    try {
+      const nextAttachments = await pickAttachments();
+      if (nextAttachments.length === 0) return;
+      setCommentAttachments((current) => [...current, ...nextAttachments]);
+    } catch (error) {
+      Alert.alert(
+        "No se pudo seleccionar el archivo",
+        error instanceof Error ? error.message : "Intenta de nuevo.",
+      );
+    }
+  }, []);
 
   const send = useCallback(async () => {
-    if (!taskId || !comment.trim()) return;
+    if (!taskId || (!comment.trim() && commentAttachments.length === 0)) return;
     setSending(true);
     try {
+      const uploaded =
+        commentAttachments.length > 0
+          ? await uploadPickedAttachments(commentAttachments, () => generateCommentUploadUrl({}))
+          : { names: [], storageIds: [] };
+
       await addComment({
-        profileId: user.id,
-        taskId,
-        content: comment,
+        adjuntoNombres: uploaded.names.length > 0 ? uploaded.names : undefined,
+        adjuntos: uploaded.storageIds.length > 0 ? uploaded.storageIds : undefined,
+        autorId: user.id,
+        contenido: comment.trim() || "Adjuntos",
+        tareaId: taskId,
       });
       setComment("");
+      setCommentAttachments([]);
     } catch (error) {
       Alert.alert(
         "No se pudo comentar",
@@ -987,7 +1230,94 @@ function TaskDetailModal({
     } finally {
       setSending(false);
     }
-  }, [addComment, comment, taskId, user.id]);
+  }, [addComment, comment, commentAttachments, generateCommentUploadUrl, taskId, user.id]);
+
+  const addAttachmentsToTask = useCallback(async () => {
+    if (!taskId) return;
+    try {
+      const attachments = await pickAttachments();
+      if (attachments.length === 0) return;
+
+      setUploadingTaskAttachments(true);
+      const uploaded = await uploadPickedAttachments(attachments, () => generateTaskUploadUrl({}));
+      await addTaskAttachments({
+        adjuntoNombres: uploaded.names,
+        adjuntos: uploaded.storageIds,
+        tareaId: taskId,
+      });
+    } catch (error) {
+      Alert.alert(
+        "No se pudieron subir los adjuntos",
+        error instanceof Error ? error.message : "Intenta de nuevo.",
+      );
+    } finally {
+      setUploadingTaskAttachments(false);
+    }
+  }, [addTaskAttachments, generateTaskUploadUrl, taskId]);
+
+  const removeAttachmentFromTask = useCallback(
+    async (attachmentId: Id<"_storage">) => {
+      if (!taskId) return;
+      setRemovingTaskAttachmentId(attachmentId);
+      try {
+        await removeTaskAttachment({
+          adjuntoId: attachmentId,
+          tareaId: taskId,
+        });
+      } catch (error) {
+        Alert.alert(
+          "No se pudo quitar el adjunto",
+          error instanceof Error ? error.message : "Intenta de nuevo.",
+        );
+      } finally {
+        setRemovingTaskAttachmentId(null);
+      }
+    },
+    [removeTaskAttachment, taskId],
+  );
+
+  const saveEdit = useCallback(async () => {
+    if (!taskId || !editTitle.trim()) {
+      Alert.alert("Falta título", "Ingresa el nombre de la tarea.");
+      return;
+    }
+
+    setSavingEdit(true);
+    try {
+      await updateTask({
+        description: editDescription.trim(),
+        dueDate: editDueDate.trim() || undefined,
+        ownerIds: editOwnerIds,
+        phaseIndex: editPhaseIndex ?? undefined,
+        priority: editPriority ?? undefined,
+        profileId: user.id,
+        status: editStatus,
+        tag: editTag.trim(),
+        taskId,
+        title: editTitle.trim(),
+      });
+      setEditOpen(false);
+    } catch (error) {
+      Alert.alert(
+        "No se pudo actualizar la tarea",
+        error instanceof Error ? error.message : "Intenta de nuevo.",
+      );
+    } finally {
+      setSavingEdit(false);
+    }
+  }, [
+    editDescription,
+    editDueDate,
+    editOwnerIds,
+    editPhaseIndex,
+    editPriority,
+    editStatus,
+    editTag,
+    editTitle,
+    taskId,
+    updateTask,
+    user.id,
+  ]);
 
   const changeStatus = useCallback(
     async (status: TaskStatus) => {
@@ -1019,7 +1349,13 @@ function TaskDetailModal({
             <Ionicons name="close" size={24} color="#111" />
           </Pressable>
           <Text style={styles.modalTitle}>Detalle de tarea</Text>
-          <View style={styles.headerSpacer} />
+          {detail ? (
+            <Pressable onPress={() => setEditOpen(true)} style={styles.backButton}>
+              <Ionicons name="create-outline" size={22} color="#111" />
+            </Pressable>
+          ) : (
+            <View style={styles.headerSpacer} />
+          )}
         </View>
 
         {detail === undefined ? (
@@ -1083,16 +1419,51 @@ function TaskDetailModal({
                   ? detail.owners.map((owner) => owner.name).join(", ")
                   : "Sin encargados"}
               </Text>
-              {detail.attachments.length > 0 ? (
-                <>
-                  <Text style={styles.sectionTitle}>Adjuntos</Text>
-                  {detail.attachments.map((attachment, index) => (
-                    <Text key={`${attachment.name}-${index}`} style={styles.stateText}>
-                      {attachment.name}
-                    </Text>
-                  ))}
-                </>
-              ) : null}
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Adjuntos</Text>
+                <Pressable
+                  disabled={uploadingTaskAttachments}
+                  onPress={addAttachmentsToTask}
+                  style={[styles.smallActionButton, uploadingTaskAttachments && styles.pressed]}
+                >
+                  {uploadingTaskAttachments ? (
+                    <ActivityIndicator color="#111" />
+                  ) : (
+                    <>
+                      <Ionicons name="attach" size={17} color="#111" />
+                      <Text style={styles.smallActionText}>Adjuntar</Text>
+                    </>
+                  )}
+                </Pressable>
+              </View>
+              {detail.attachments.length === 0 ? (
+                <Text style={styles.stateText}>Sin adjuntos.</Text>
+              ) : (
+                detail.attachments.map((attachment, index) => {
+                  const attachmentId = taskAttachmentId(attachment);
+                  return (
+                    <View key={`${attachment.name}-${index}`} style={styles.attachmentRow}>
+                      <Ionicons name="document-attach-outline" size={18} color="#667085" />
+                      <Text numberOfLines={1} style={styles.attachmentName}>
+                        {attachment.name}
+                      </Text>
+                      {attachmentId ? (
+                        <Pressable
+                          disabled={removingTaskAttachmentId != null}
+                          onPress={() => removeAttachmentFromTask(attachmentId)}
+                          style={styles.inlineIconButton}
+                        >
+                          {removingTaskAttachmentId === attachmentId ? (
+                            <ActivityIndicator color="#111" />
+                          ) : (
+                            <Ionicons name="close" size={17} color="#111" />
+                          )}
+                        </Pressable>
+                      ) : null}
+                    </View>
+                  );
+                })
+              )}
             </View>
 
             <View style={styles.detailCard}>
@@ -1106,11 +1477,59 @@ function TaskDetailModal({
                       {item.authorName} · {item.createdLabel}
                     </Text>
                     <Text style={styles.commentText}>{item.content}</Text>
+                    {item.attachmentNames.length > 0 ? (
+                      <View style={styles.commentAttachmentList}>
+                        {item.attachmentNames.map((name, index) => (
+                          <View key={`${item.id}-${name}-${index}`} style={styles.commentAttachment}>
+                            <Ionicons name="document-outline" size={15} color="#667085" />
+                            <Text numberOfLines={1} style={styles.commentAttachmentText}>
+                              {name}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    ) : null}
                   </View>
                 ))
               )}
 
+              {commentAttachments.length > 0 ? (
+                <View style={styles.selectedAttachments}>
+                  {commentAttachments.map((attachment, index) => (
+                    <View key={`${attachment.uri}-${index}`} style={styles.selectedAttachment}>
+                      <Ionicons name="document-attach-outline" size={16} color="#667085" />
+                      <View style={styles.selectedAttachmentTextBox}>
+                        <Text numberOfLines={1} style={styles.attachmentName}>
+                          {attachment.name}
+                        </Text>
+                        {attachment.size ? (
+                          <Text style={styles.attachmentMeta}>{formatFileSize(attachment.size)}</Text>
+                        ) : null}
+                      </View>
+                      <Pressable
+                        disabled={sending}
+                        onPress={() =>
+                          setCommentAttachments((current) =>
+                            current.filter((_, itemIndex) => itemIndex !== index),
+                          )
+                        }
+                        style={styles.inlineIconButton}
+                      >
+                        <Ionicons name="close" size={17} color="#111" />
+                      </Pressable>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
+
               <View style={styles.commentComposer}>
+                <Pressable
+                  disabled={sending}
+                  onPress={pickCommentAttachments}
+                  style={[styles.sendButton, sending && styles.pressed]}
+                >
+                  <Ionicons name="attach" size={20} color="#111" />
+                </Pressable>
                 <TextInput
                   multiline
                   onChangeText={setComment}
@@ -1120,9 +1539,13 @@ function TaskDetailModal({
                   value={comment}
                 />
                 <Pressable
-                  disabled={sending || !comment.trim()}
+                  disabled={sending || (!comment.trim() && commentAttachments.length === 0)}
                   onPress={send}
-                  style={[styles.sendButton, (sending || !comment.trim()) && styles.pressed]}
+                  style={[
+                    styles.sendButton,
+                    (sending || (!comment.trim() && commentAttachments.length === 0)) &&
+                      styles.pressed,
+                  ]}
                 >
                   {sending ? (
                     <ActivityIndicator color="#111" />
@@ -1134,6 +1557,59 @@ function TaskDetailModal({
             </View>
           </ScrollView>
         )}
+
+        <Modal animationType="slide" onRequestClose={() => setEditOpen(false)} visible={editOpen}>
+          <SafeAreaView style={styles.modalRoot}>
+            <View style={styles.modalHeader}>
+              <Pressable onPress={() => setEditOpen(false)} style={styles.backButton}>
+                <Ionicons name="close" size={24} color="#111" />
+              </Pressable>
+              <Text style={styles.modalTitle}>Editar tarea</Text>
+              <View style={styles.headerSpacer} />
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalContent}>
+              <TaskFormFields
+                description={editDescription}
+                dueDate={editDueDate}
+                members={members}
+                onDescriptionChange={setEditDescription}
+                onDueDateChange={setEditDueDate}
+                onOwnerIdsChange={setEditOwnerIds}
+                onPhaseIndexChange={setEditPhaseIndex}
+                onPriorityChange={setEditPriority}
+                onStatusChange={setEditStatus}
+                onTagChange={setEditTag}
+                onTitleChange={setEditTitle}
+                ownerIds={editOwnerIds}
+                phaseIndex={editPhaseIndex}
+                phases={phases}
+                priority={editPriority}
+                status={editStatus}
+                tag={editTag}
+                title={editTitle}
+              />
+
+              <Pressable
+                disabled={savingEdit}
+                onPress={saveEdit}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  (pressed || savingEdit) && styles.pressed,
+                ]}
+              >
+                {savingEdit ? (
+                  <ActivityIndicator color="#111" />
+                ) : (
+                  <>
+                    <Text style={styles.primaryText}>Guardar cambios</Text>
+                    <Ionicons name="checkmark" size={21} color="#111" />
+                  </>
+                )}
+              </Pressable>
+            </ScrollView>
+          </SafeAreaView>
+        </Modal>
       </SafeAreaView>
     </Modal>
   );
@@ -1347,6 +1823,14 @@ const styles = StyleSheet.create({
   projectTitleBox: { flex: 1, minWidth: 0 },
   company: { color: "#7b7264", fontSize: 12, fontWeight: "800", marginBottom: 3 },
   projectName: { color: "#111", fontSize: 18, fontWeight: "900", lineHeight: 22 },
+  favoriteBadge: {
+    alignItems: "center",
+    backgroundColor: "#f6de39",
+    borderRadius: 999,
+    height: 32,
+    justifyContent: "center",
+    width: 32,
+  },
   chip: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
   chipText: { fontSize: 12, fontWeight: "900" },
   phaseChip: {
@@ -1442,6 +1926,43 @@ const styles = StyleSheet.create({
     width: "48%",
   },
   sectionTitle: { color: "#111", fontSize: 16, fontWeight: "900", marginTop: 4 },
+  sectionHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 4,
+  },
+  smallActionButton: {
+    alignItems: "center",
+    backgroundColor: "#f6de39",
+    borderRadius: 999,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 34,
+    paddingHorizontal: 11,
+  },
+  smallActionText: { color: "#111", fontSize: 12, fontWeight: "900" },
+  attachmentRow: {
+    alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderRadius: 12,
+    flexDirection: "row",
+    gap: 8,
+    minHeight: 44,
+    paddingHorizontal: 10,
+  },
+  attachmentName: { color: "#111", flex: 1, fontSize: 13, fontWeight: "800" },
+  attachmentMeta: { color: "#667085", fontSize: 11, fontWeight: "700" },
+  inlineIconButton: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 30,
+    justifyContent: "center",
+    width: 30,
+  },
   commentBubble: {
     backgroundColor: "#f8f7f2",
     borderRadius: 14,
@@ -1450,6 +1971,32 @@ const styles = StyleSheet.create({
   },
   commentAuthor: { color: "#667085", fontSize: 12, fontWeight: "800" },
   commentText: { color: "#111", fontSize: 14, lineHeight: 20 },
+  commentAttachmentList: { gap: 6, marginTop: 4 },
+  commentAttachment: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 10,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 34,
+    paddingHorizontal: 9,
+  },
+  commentAttachmentText: { color: "#475467", flex: 1, fontSize: 12, fontWeight: "800" },
+  selectedAttachments: { gap: 8, marginTop: 4 },
+  selectedAttachment: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    minHeight: 46,
+    paddingHorizontal: 10,
+  },
+  selectedAttachmentTextBox: { flex: 1, minWidth: 0 },
   commentComposer: {
     alignItems: "flex-end",
     flexDirection: "row",
