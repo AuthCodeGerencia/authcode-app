@@ -28,12 +28,7 @@ import type { Id } from "./convex/_generated/dataModel";
 
 const SESSION_KEY = "authcode.mobile.session";
 const convexUrl = process.env.EXPO_PUBLIC_CONVEX_URL;
-
-if (!convexUrl) {
-  throw new Error("Falta EXPO_PUBLIC_CONVEX_URL en .env");
-}
-
-const convex = new ConvexReactClient(convexUrl);
+const convex = convexUrl ? new ConvexReactClient(convexUrl) : null;
 
 type SessionUser = {
   id: Id<"profile">;
@@ -257,7 +252,13 @@ function useSession() {
   return { user, loading, login, logout };
 }
 
-function LoginScreen({ onLogin }: { onLogin: (user: SessionUser) => Promise<void> }) {
+function LoginScreen({
+  authClient,
+  onLogin,
+}: {
+  authClient: ConvexReactClient;
+  onLogin: (user: SessionUser) => Promise<void>;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -271,7 +272,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: SessionUser) => Promise<void
 
     setSubmitting(true);
     try {
-      const result = await convex.query(api.users.verifyCredentials, {
+      const result = await authClient.query(api.users.verifyCredentials, {
         email: email.trim(),
         password,
       });
@@ -296,7 +297,7 @@ function LoginScreen({ onLogin }: { onLogin: (user: SessionUser) => Promise<void
     } finally {
       setSubmitting(false);
     }
-  }, [email, onLogin, password]);
+  }, [authClient, email, onLogin, password]);
 
   return (
     <LinearGradient colors={["#111", "#211f18", "#f6de39"]} style={styles.loginRoot}>
@@ -1683,7 +1684,7 @@ function NotificationsModal({
   );
 }
 
-function Root() {
+function Root({ authClient }: { authClient: ConvexReactClient }) {
   const { user, loading, login, logout } = useSession();
 
   if (loading) {
@@ -1694,14 +1695,29 @@ function Root() {
     );
   }
 
-  return user ? <Dashboard onLogout={logout} user={user} /> : <LoginScreen onLogin={login} />;
+  return user ? (
+    <Dashboard onLogout={logout} user={user} />
+  ) : (
+    <LoginScreen authClient={authClient} onLogin={login} />
+  );
 }
 
 export default function App() {
+  if (!convex) {
+    return (
+      <SafeAreaProvider>
+        <View style={styles.boot}>
+          <Text style={styles.bootTitle}>Configuración incompleta</Text>
+          <Text style={styles.bootText}>Falta EXPO_PUBLIC_CONVEX_URL en este build.</Text>
+        </View>
+      </SafeAreaProvider>
+    );
+  }
+
   return (
     <SafeAreaProvider>
       <ConvexProvider client={convex}>
-        <Root />
+        <Root authClient={convex} />
       </ConvexProvider>
     </SafeAreaProvider>
   );
@@ -1709,6 +1725,8 @@ export default function App() {
 
 const styles = StyleSheet.create({
   boot: { alignItems: "center", backgroundColor: "#111", flex: 1, justifyContent: "center" },
+  bootText: { color: "#d0d5dd", fontSize: 14, lineHeight: 20, marginTop: 8, textAlign: "center" },
+  bootTitle: { color: "#fff", fontSize: 18, fontWeight: "800" },
   loginRoot: { flex: 1 },
   loginContent: { flex: 1, justifyContent: "flex-end", padding: 18 },
   loginCard: {
