@@ -1728,7 +1728,7 @@ const styles = StyleSheet.create({
   bootText: { color: "#d0d5dd", fontSize: 14, lineHeight: 20, marginTop: 8, textAlign: "center" },
   bootTitle: { color: "#fff", fontSize: 18, fontWeight: "800" },
   loginRoot: { flex: 1 },
-  loginContent: { flex: 1, justifyContent: "flex-end", padding: 18 },
+  loginContent: { flex: 1, justifyContent: "center", padding: 18, paddingVertical: 34 },
   loginCard: {
     backgroundColor: "#fff",
     borderRadius: 28,
