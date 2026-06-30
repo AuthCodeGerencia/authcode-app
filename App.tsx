@@ -1279,9 +1279,8 @@ function HoursPanel({
           <Text style={styles.stateText}>Sin registros todavía.</Text>
         ) : (
           summary.logs.map((log) => (
-            <Pressable
+            <View
               key={log.id}
-              onPress={() => onOpenTask(null, log.id as unknown as Id<"tareas">)}
               style={styles.logRow}
             >
               <View style={styles.projectTitleBox}>
@@ -1289,7 +1288,7 @@ function HoursPanel({
                 <Text numberOfLines={1} style={styles.taskMeta}>{log.projectName} · {log.startedLabel}</Text>
               </View>
               <Text style={styles.metricValue}>{log.durationLabel}</Text>
-            </Pressable>
+            </View>
           ))
         )}
       </View>
@@ -1518,6 +1517,10 @@ function TasksScreen({
     profileId: user.id,
     projectId: project.id,
   });
+  const projectDetail = useQuery((api as any).mobile.getProjectDetail, {
+    profileId: user.id,
+    projectId: project.id,
+  }) as ProjectDetail | undefined;
   const createTask = useMutation(api.mobile.createProjectTask);
   const [statusTab, setStatusTab] = useState<"todas" | TaskStatus>("todas");
   const [createOpen, setCreateOpen] = useState(false);
@@ -1619,7 +1622,80 @@ function TasksScreen({
           <View style={styles.track}>
             <View style={[styles.fill, { width: `${project.percent}%` }]} />
           </View>
+          {projectDetail?.notes ? (
+            <Text style={styles.taskDescription}>{projectDetail.notes}</Text>
+          ) : null}
         </View>
+
+        {projectDetail ? (
+          <>
+            <View style={styles.detailCard}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Fases</Text>
+                <Text style={styles.taskMeta}>{projectDetail.lifecycle}</Text>
+              </View>
+              <View style={styles.phaseList}>
+                {projectDetail.phases.map((phase) => (
+                  <View key={phase.index} style={[styles.phaseRow, phase.active && styles.phaseRowActive]}>
+                    <View style={[styles.taskStatusDot, { backgroundColor: phase.completed ? "#067647" : phase.active ? "#111" : "#98a2b3" }]} />
+                    <View style={styles.projectTitleBox}>
+                      <Text numberOfLines={1} style={styles.taskTitle}>{phase.name}</Text>
+                      <Text style={styles.taskMeta}>{phase.dueDate || "Sin fecha"}</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.detailCard}>
+              <Text style={styles.sectionTitle}>Equipo</Text>
+              <View style={styles.statusGrid}>
+                {projectDetail.members.map((member) => (
+                  <View key={member.id} style={styles.statusOption}>
+                    <Text style={styles.statusOptionText}>{member.name}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+
+            <View style={styles.detailCard}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Tickets recientes</Text>
+                <Text style={styles.taskMeta}>{projectDetail.tickets.length}</Text>
+              </View>
+              {projectDetail.tickets.length === 0 ? (
+                <Text style={styles.stateText}>Sin tickets para este proyecto.</Text>
+              ) : (
+                projectDetail.tickets.map((ticket) => (
+                  <View key={ticket.id} style={styles.attachmentRow}>
+                    <Ionicons name="ticket-outline" size={18} color="#667085" />
+                    <Text numberOfLines={1} style={styles.attachmentName}>{ticket.title}</Text>
+                    <Text style={styles.taskMeta}>{ticket.status}</Text>
+                  </View>
+                ))
+              )}
+            </View>
+
+            <View style={styles.detailCard}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>Avances</Text>
+                <Text style={styles.taskMeta}>{projectDetail.avances.length}</Text>
+              </View>
+              {projectDetail.avances.length === 0 ? (
+                <Text style={styles.stateText}>Sin avances recientes.</Text>
+              ) : (
+                projectDetail.avances.map((avance) => (
+                  <View key={avance.id} style={styles.commentBubble}>
+                    <Text style={styles.commentAuthor}>{avance.name} · {avance.status}</Text>
+                    {avance.description ? (
+                      <Text numberOfLines={2} style={styles.commentText}>{avance.description}</Text>
+                    ) : null}
+                  </View>
+                ))
+              )}
+            </View>
+          </>
+        ) : null}
 
         <ScrollView
           contentContainerStyle={styles.tabsContent}
@@ -1781,16 +1857,24 @@ function TaskDetailModal({
     api.mobile.getTaskDetail,
     taskId ? { profileId: user.id, taskId } : "skip",
   ) as TaskDetail | null | undefined;
+  const workSummary = useQuery(
+    (api as any).mobile.getWorkSummary,
+    taskId ? { profileId: user.id, limit: 5 } : "skip",
+  ) as WorkSummary | undefined;
   const addComment = useMutation(api.comentarioTareas.createComentarioTarea);
   const generateCommentUploadUrl = useMutation(api.comentarioTareas.generateUploadUrl);
   const generateTaskUploadUrl = useMutation(api.tareas.generateUploadUrl);
   const addTaskAttachments = useMutation(api.tareas.addAdjuntosToTarea);
   const removeTaskAttachment = useMutation(api.tareas.removeAdjuntoFromTarea);
   const updateTask = useMutation(api.mobile.updateProjectTask);
+  const startTimer = useMutation((api as any).mobile.startTaskTimer);
+  const pauseTimer = useMutation((api as any).mobile.pauseTaskTimer);
+  const stopTimer = useMutation((api as any).mobile.stopTaskTimer);
   const [comment, setComment] = useState("");
   const [commentAttachments, setCommentAttachments] = useState<PickedAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState<TaskStatus | null>(null);
+  const [timerAction, setTimerAction] = useState<"start" | "pause" | "stop" | null>(null);
   const [uploadingTaskAttachments, setUploadingTaskAttachments] = useState(false);
   const [removingTaskAttachmentId, setRemovingTaskAttachmentId] =
     useState<Id<"_storage"> | null>(null);
@@ -1976,6 +2060,26 @@ function TaskDetailModal({
     [detail, taskId, updateTask, user.id],
   );
 
+  const activeForThisTask = Boolean(
+    taskId && workSummary?.activeTimer?.taskId === taskId,
+  );
+  const timerMode = activeForThisTask ? workSummary?.activeTimer?.mode : null;
+  const runTimerAction = useCallback(
+    async (action: "start" | "pause" | "stop") => {
+      if (!taskId) return;
+      setTimerAction(action);
+      try {
+        const fn = action === "start" ? startTimer : action === "pause" ? pauseTimer : stopTimer;
+        await fn({ profileId: user.id, taskId });
+      } catch (error) {
+        Alert.alert("No se pudo actualizar el timer", error instanceof Error ? error.message : "Intenta de nuevo.");
+      } finally {
+        setTimerAction(null);
+      }
+    },
+    [pauseTimer, startTimer, stopTimer, taskId, user.id],
+  );
+
   return (
     <Modal animationType="slide" onRequestClose={onClose} visible={taskId != null}>
       <SafeAreaView style={styles.modalRoot}>
@@ -2015,6 +2119,46 @@ function TaskDetailModal({
                 <InfoPill label="Prioridad" value={detail.priority ?? "Sin prioridad"} />
                 <InfoPill label="Etiqueta" value={detail.tag ?? "Sin etiqueta"} />
                 <InfoPill label="Entrega" value={detail.dueDate} />
+              </View>
+              <View style={styles.timerBox}>
+                <View style={styles.projectTitleBox}>
+                  <Text style={styles.sectionTitle}>Timer</Text>
+                  <Text style={styles.taskMeta}>
+                    {activeForThisTask
+                      ? `${timerMode === "running" ? "Corriendo" : "Pausado"} · ${workSummary?.activeTimer?.workedLabel ?? "0 min"}`
+                      : "Sin timer activo en esta tarea"}
+                  </Text>
+                </View>
+                <View style={styles.inlineActions}>
+                  <Pressable
+                    disabled={timerAction != null}
+                    onPress={() => runTimerAction("start")}
+                    style={styles.smallActionButton}
+                  >
+                    {timerAction === "start" ? <ActivityIndicator color="#111" /> : <Ionicons name="play" size={17} color="#111" />}
+                    <Text style={styles.smallActionText}>{activeForThisTask ? "Reanudar" : "Iniciar"}</Text>
+                  </Pressable>
+                  {activeForThisTask ? (
+                    <>
+                      <Pressable
+                        disabled={timerAction != null || timerMode !== "running"}
+                        onPress={() => runTimerAction("pause")}
+                        style={styles.smallActionButton}
+                      >
+                        {timerAction === "pause" ? <ActivityIndicator color="#111" /> : <Ionicons name="pause" size={17} color="#111" />}
+                        <Text style={styles.smallActionText}>Pausar</Text>
+                      </Pressable>
+                      <Pressable
+                        disabled={timerAction != null}
+                        onPress={() => runTimerAction("stop")}
+                        style={styles.smallActionButton}
+                      >
+                        {timerAction === "stop" ? <ActivityIndicator color="#111" /> : <Ionicons name="stop" size={17} color="#111" />}
+                        <Text style={styles.smallActionText}>Detener</Text>
+                      </Pressable>
+                    </>
+                  ) : null}
+                </View>
               </View>
               <Text style={styles.sectionTitle}>Estado</Text>
               <View style={styles.statusGrid}>
@@ -2432,6 +2576,29 @@ const styles = StyleSheet.create({
   summaryItem: { flex: 1, gap: 4 },
   summaryValue: { color: "#f6de39", fontSize: 22, fontWeight: "900", textAlign: "center" },
   summaryLabel: { color: "#ebe7d9", fontSize: 11, fontWeight: "700", textAlign: "center" },
+  segmented: {
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 16,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    marginBottom: 14,
+    padding: 5,
+  },
+  segmentButton: {
+    alignItems: "center",
+    borderRadius: 12,
+    flex: 1,
+    flexDirection: "row",
+    gap: 6,
+    justifyContent: "center",
+    minHeight: 40,
+  },
+  segmentButtonActive: { backgroundColor: "#111" },
+  segmentText: { color: "#475467", fontSize: 13, fontWeight: "900" },
+  segmentTextActive: { color: "#fff" },
+  segmentCount: { color: "#667085", fontSize: 12, fontWeight: "900" },
   searchShell: {
     alignItems: "center",
     backgroundColor: "#fff",
@@ -2466,6 +2633,7 @@ const styles = StyleSheet.create({
   stateCard: { alignItems: "center", backgroundColor: "#fff", borderRadius: 20, gap: 10, padding: 28 },
   emptyTitle: { color: "#111", fontSize: 18, fontWeight: "900" },
   stateText: { color: "#667085", fontSize: 14, lineHeight: 20, textAlign: "center" },
+  panelStack: { gap: 14 },
   list: { gap: 14 },
   projectCard: { backgroundColor: "#fff", borderColor: "#ece7da", borderRadius: 18, borderWidth: 1, gap: 14, padding: 16 },
   cardPressed: { opacity: 0.72 },
@@ -2544,6 +2712,16 @@ const styles = StyleSheet.create({
   },
   projectMiniLabel: { color: "#667085", fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
   projectMiniValue: { color: "#111", fontSize: 17, fontWeight: "900" },
+  phaseList: { gap: 8 },
+  phaseRow: {
+    alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderRadius: 12,
+    flexDirection: "row",
+    gap: 10,
+    padding: 10,
+  },
+  phaseRowActive: { backgroundColor: "#fff7c2", borderColor: "#f6de39", borderWidth: 1 },
   taskRow: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
@@ -2568,6 +2746,30 @@ const styles = StyleSheet.create({
     padding: 16,
   },
   detailTaskTitle: { color: "#111", fontSize: 22, fontWeight: "900", lineHeight: 27 },
+  ticketCard: {
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 16,
+    borderWidth: 1,
+    gap: 12,
+    padding: 14,
+  },
+  timerBox: {
+    backgroundColor: "#f8f7f2",
+    borderRadius: 14,
+    gap: 12,
+    padding: 12,
+  },
+  inlineActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  bigNumber: { color: "#111", fontSize: 30, fontWeight: "900" },
+  logRow: {
+    alignItems: "center",
+    borderBottomColor: "#ece7da",
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    paddingVertical: 10,
+  },
   infoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   infoPill: {
     backgroundColor: "#f8f7f2",
