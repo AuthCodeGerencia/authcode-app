@@ -38,7 +38,14 @@
     },
     "owner": "authcode",
     "plugins": [
-      "expo-font"
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "color": "#111111",
+          "defaultChannel": "default"
+        }
+      ]
     ]
   }
 }

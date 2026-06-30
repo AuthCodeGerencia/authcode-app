@@ -1,9 +1,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Ionicons } from "@expo/vector-icons";
-import { ConvexProvider, useMutation, useQuery } from "convex/react";
+import { ConvexProvider, useAction, useMutation, useQuery } from "convex/react";
 import { ConvexReactClient } from "convex/react";
+import Constants from "expo-constants";
 import * as DocumentPicker from "expo-document-picker";
 import { LinearGradient } from "expo-linear-gradient";
+import * as Notifications from "expo-notifications";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -30,6 +32,15 @@ const SESSION_KEY = "authcode.mobile.session";
 const convexUrl = process.env.EXPO_PUBLIC_CONVEX_URL;
 const convex = convexUrl ? new ConvexReactClient(convexUrl) : null;
 
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
+
 type SessionUser = {
   id: Id<"profile">;
   name: string;
@@ -54,6 +65,7 @@ type Project = {
 };
 
 type ProjectTab = "todos" | "favoritos" | string;
+type DashboardTab = "proyectos" | "tickets" | "horas";
 
 type TaskStatus =
   | "idea"
@@ -123,6 +135,12 @@ type NotificationItem = {
   taskId: Id<"tareas"> | null;
 };
 
+type PushDestination = {
+  notificationId?: Id<"notificaciones">;
+  projectId?: Id<"proyectos">;
+  taskId?: Id<"tareas">;
+};
+
 type TaskDetail = {
   id: Id<"tareas">;
   title: string;
@@ -150,6 +168,59 @@ type TaskDetail = {
   }>;
 };
 
+type ProjectDetail = {
+  phases: Array<{ index: number; name: string; dueDate: string; completed: boolean; active: boolean }>;
+  members: ProjectMember[];
+  tickets: Array<{ id: Id<"tickets">; title: string; status: string; priority: string; createdLabel: string }>;
+  avances: Array<{ id: Id<"avances">; name: string; description: string; status: string; phaseIndex: number | null }>;
+  documentsCount: number;
+  notes: string;
+  lifecycle: string;
+};
+
+type TicketItem = {
+  id: Id<"tickets">;
+  title: string;
+  description: string;
+  status: "abierto" | "en_proceso" | "cerrado" | string;
+  priority: string;
+  type: string;
+  projectId: Id<"proyectos"> | null;
+  projectName: string;
+  assignedTo: string;
+  createdLabel: string;
+  historyCount: number;
+};
+
+type WorkSummary = {
+  activeTimer: null | {
+    taskId: Id<"tareas">;
+    projectId: Id<"proyectos"> | null;
+    taskTitle: string;
+    projectName: string;
+    mode: "running" | "paused";
+    workedMs: number;
+    workedLabel: string;
+  };
+  pausedTimers: Array<{
+    taskId: Id<"tareas">;
+    taskTitle: string;
+    projectName: string;
+    workedMs: number;
+    workedLabel: string;
+  }>;
+  logs: Array<{
+    id: Id<"time_work_logs">;
+    taskTitle: string;
+    projectName: string;
+    startedLabel: string;
+    durationMs: number;
+    durationLabel: string;
+  }>;
+  todayMs: number;
+  todayLabel: string;
+};
+
 const TASK_STATUS_OPTIONS: Array<{ key: TaskStatus; label: string }> = [
   { key: "idea", label: "Idea" },
   { key: "pendiente", label: "Pendiente" },
@@ -165,6 +236,19 @@ const PRIORITY_OPTIONS: Array<{ key: TaskPriority; label: string }> = [
   { key: "media", label: "Media" },
   { key: "baja", label: "Baja" },
 ];
+
+const TICKET_STATUS_OPTIONS = [
+  { key: "abierto", label: "Abierto" },
+  { key: "en_proceso", label: "En proceso" },
+  { key: "cerrado", label: "Cerrado" },
+] as const;
+
+const TICKET_PRIORITY_OPTIONS = [
+  { key: "low", label: "Baja" },
+  { key: "medium", label: "Media" },
+  { key: "high", label: "Alta" },
+  { key: "urgent", label: "Urgente" },
+] as const;
 
 async function pickAttachments() {
   const result = await DocumentPicker.getDocumentAsync({
@@ -211,6 +295,66 @@ async function uploadPickedAttachments(
   }
 
   return { names, storageIds };
+}
+
+async function getPushRegistrationTokens() {
+  if (Platform.OS === "web") return null;
+
+  if (Platform.OS === "android") {
+    await Notifications.setNotificationChannelAsync("default", {
+      importance: Notifications.AndroidImportance.MAX,
+      name: "General",
+      sound: "default",
+      vibrationPattern: [0, 250, 250, 250],
+    });
+  }
+
+  const currentPermissions = await Notifications.getPermissionsAsync();
+  const finalPermissions = currentPermissions.granted
+    ? currentPermissions
+    : await Notifications.requestPermissionsAsync();
+
+  if (!finalPermissions.granted) return null;
+
+  const nativeToken = await Notifications.getDevicePushTokenAsync().catch(() => null);
+  const projectId =
+    Constants.expoConfig?.extra?.eas?.projectId ??
+    Constants.easConfig?.projectId;
+  const expoToken = projectId
+    ? await Notifications.getExpoPushTokenAsync({ projectId }).catch(() => null)
+    : null;
+
+  if (!nativeToken?.data && !expoToken?.data) return null;
+
+  return {
+    expoToken: expoToken?.data ?? null,
+    nativeToken: nativeToken?.data ?? null,
+    nativeTokenType: nativeToken?.type ?? null,
+    platform: Platform.OS,
+  };
+}
+
+function stringFromNotificationData(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function destinationFromNotificationResponse(
+  response: Notifications.NotificationResponse | null,
+): PushDestination | null {
+  const data = response?.notification.request.content.data;
+  if (!data) return null;
+
+  const projectId = stringFromNotificationData(data.projectId ?? data.project_id);
+  const taskId = stringFromNotificationData(data.taskId ?? data.task_id);
+  const notificationId = stringFromNotificationData(data.notificationId ?? data.notification_id);
+
+  if (!projectId && !notificationId) return null;
+
+  return {
+    notificationId: notificationId as Id<"notificaciones"> | undefined,
+    projectId: projectId as Id<"proyectos"> | undefined,
+    taskId: taskId as Id<"tareas"> | undefined,
+  };
 }
 
 function formatFileSize(size?: number) {
@@ -380,7 +524,17 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     profileId: user.id,
     limit: 40,
   });
+  const ticketsResult = useQuery((api as any).mobile.getTicketsOverview, {
+    profileId: user.id,
+    limit: 80,
+  }) as { tickets: TicketItem[] } | undefined;
+  const workResult = useQuery((api as any).mobile.getWorkSummary, {
+    profileId: user.id,
+    limit: 25,
+  }) as WorkSummary | undefined;
   const markNotificationRead = useMutation(api.mobile.markNotificationRead);
+  const registerPushToken = useMutation((api as any).mobile.registerPushToken);
+  const sendTestPush = useAction((api as any).pushNotifications.testForProfile);
   const projects = (result?.projects ?? []) as Project[];
   const favoriteProjectIds = useMemo(
     () => new Set(profileResult?.proyectos_favoritos ?? []),
@@ -397,11 +551,117 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
   const loading = result === undefined;
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<ProjectTab>("todos");
+  const [mainTab, setMainTab] = useState<DashboardTab>("proyectos");
   const [selectedProject, setSelectedProject] = useState<{
     project: Project;
     taskId?: Id<"tareas">;
   } | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [testingPush, setTestingPush] = useState(false);
+  const [pendingPushDestination, setPendingPushDestination] = useState<PushDestination | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    getPushRegistrationTokens()
+      .then(async (tokens) => {
+        if (cancelled || !tokens) return;
+        await registerPushToken({
+          expoToken: tokens.expoToken ?? undefined,
+          nativeToken: tokens.nativeToken ?? undefined,
+          nativeTokenType: tokens.nativeTokenType ?? undefined,
+          platform: tokens.platform,
+          profileId: user.id,
+        });
+      })
+      .catch((error) => {
+        console.warn("[push] No se pudo registrar el dispositivo", error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [registerPushToken, user.id]);
+
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        const destination = destinationFromNotificationResponse(response);
+        if (destination) setPendingPushDestination(destination);
+      })
+      .catch(() => {});
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const destination = destinationFromNotificationResponse(response);
+      if (destination) setPendingPushDestination(destination);
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingPushDestination) return;
+
+    const project = projectsWithFavorites.find(
+      (item) => item.id === pendingPushDestination.projectId,
+    );
+    if (!project) return;
+
+    setSelectedProject({
+      project,
+      taskId: pendingPushDestination.taskId,
+    });
+
+    if (pendingPushDestination.notificationId) {
+      markNotificationRead({
+        profileId: user.id,
+        notificationId: pendingPushDestination.notificationId,
+      }).catch(() => {});
+    }
+
+    setPendingPushDestination(null);
+  }, [markNotificationRead, pendingPushDestination, projectsWithFavorites, user.id]);
+
+  const testPush = useCallback(async () => {
+    if (Platform.OS === "web") {
+      Alert.alert("No disponible", "Las push notifications solo se prueban en iOS o Android.");
+      return;
+    }
+
+    setTestingPush(true);
+    try {
+      const tokens = await getPushRegistrationTokens();
+      if (!tokens) {
+        Alert.alert("Permiso requerido", "Activa las notificaciones para este dispositivo.");
+        return;
+      }
+
+      await registerPushToken({
+        expoToken: tokens.expoToken ?? undefined,
+        nativeToken: tokens.nativeToken ?? undefined,
+        nativeTokenType: tokens.nativeTokenType ?? undefined,
+        platform: tokens.platform,
+        profileId: user.id,
+      });
+
+      const result = await sendTestPush({ profileId: user.id });
+      Alert.alert(
+        "Prueba de push",
+        `Intentos: ${result?.attempted ?? 0}\nEnviados: ${result?.sent ?? 0}\nDesactivados: ${result?.disabled ?? 0}`,
+      );
+    } catch (error) {
+      Alert.alert(
+        "No se pudo probar",
+        error instanceof Error ? error.message : "Intenta de nuevo.",
+      );
+    } finally {
+      setTestingPush(false);
+    }
+  }, [registerPushToken, sendTestPush, user.id]);
 
   const projectTabs = useMemo(() => {
     const phases = [...new Set(projectsWithFavorites.map((project) => project.phase))];
@@ -443,6 +703,11 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     }),
     [projectsWithFavorites],
   );
+  const dashboardTabs = [
+    { key: "proyectos" as const, label: "Proyectos", count: projectsWithFavorites.length },
+    { key: "tickets" as const, label: "Tickets", count: ticketsResult?.tickets.length ?? 0 },
+    { key: "horas" as const, label: "Horas", count: workResult?.logs.length ?? 0 },
+  ];
 
   if (selectedProject) {
     return (
@@ -465,6 +730,17 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
             <Text style={styles.subhead}>Proyectos y estatus</Text>
           </View>
           <View style={styles.headerActions}>
+            <Pressable
+              disabled={testingPush}
+              onPress={testPush}
+              style={[styles.logout, testingPush && styles.pressed]}
+            >
+              {testingPush ? (
+                <ActivityIndicator color="#111" size="small" />
+              ) : (
+                <Ionicons name="paper-plane-outline" size={21} color="#111" />
+              )}
+            </Pressable>
             <Pressable onPress={() => setNotificationsOpen(true)} style={styles.logout}>
               <Ionicons name="notifications-outline" size={22} color="#111" />
               {(notificationsResult?.unreadCount ?? 0) > 0 ? (
@@ -488,72 +764,108 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
           <Summary label="Listos" value={stats.done} />
         </View>
 
-        <View style={styles.searchShell}>
-          <Ionicons name="search-outline" size={19} color="#667085" />
-          <TextInput
-            autoCapitalize="none"
-            onChangeText={setSearch}
-            placeholder="Buscar proyecto, empresa o etapa"
-            placeholderTextColor="#8d95a1"
-            style={styles.searchInput}
-            value={search}
-          />
-          {search.length > 0 ? (
-            <Pressable onPress={() => setSearch("")} style={styles.clearButton}>
-              <Ionicons name="close" size={18} color="#475467" />
-            </Pressable>
-          ) : null}
-        </View>
-
-        <ScrollView
-          contentContainerStyle={styles.tabsContent}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.tabs}
-        >
-          {projectTabs.map((item) => (
+        <View style={styles.segmented}>
+          {dashboardTabs.map((item) => (
             <Pressable
-              key={String(item.key)}
-              onPress={() => setTab(item.key)}
-              style={[styles.tabButton, tab === item.key && styles.tabButtonActive]}
+              key={item.key}
+              onPress={() => setMainTab(item.key)}
+              style={[styles.segmentButton, mainTab === item.key && styles.segmentButtonActive]}
             >
-              <Text style={[styles.tabText, tab === item.key && styles.tabTextActive]}>
+              <Text style={[styles.segmentText, mainTab === item.key && styles.segmentTextActive]}>
                 {item.label}
               </Text>
-              <Text style={[styles.tabCount, tab === item.key && styles.tabTextActive]}>
+              <Text style={[styles.segmentCount, mainTab === item.key && styles.segmentTextActive]}>
                 {item.count}
               </Text>
             </Pressable>
           ))}
-        </ScrollView>
+        </View>
 
-        {loading ? (
-          <View style={styles.stateCard}>
-            <ActivityIndicator color="#111" />
-            <Text style={styles.stateText}>Cargando proyectos...</Text>
-          </View>
-        ) : projectsWithFavorites.length === 0 ? (
-          <View style={styles.stateCard}>
-            <Ionicons name="folder-open-outline" size={34} color="#68707b" />
-            <Text style={styles.emptyTitle}>No hay proyectos visibles</Text>
-            <Text style={styles.stateText}>Tu usuario no tiene proyectos activos asignados.</Text>
-          </View>
-        ) : filteredProjects.length === 0 ? (
-          <View style={styles.stateCard}>
-            <Ionicons name="search-outline" size={34} color="#68707b" />
-            <Text style={styles.emptyTitle}>Sin resultados</Text>
-            <Text style={styles.stateText}>Prueba con otro estado o búsqueda.</Text>
-          </View>
-        ) : (
-          <View style={styles.list}>
-            {filteredProjects.map((project) => (
-              <ProjectCard
-                key={project.id}
-                onPress={() => setSelectedProject({ project })}
-                project={project}
+        {mainTab === "proyectos" ? (
+          <>
+            <View style={styles.searchShell}>
+              <Ionicons name="search-outline" size={19} color="#667085" />
+              <TextInput
+                autoCapitalize="none"
+                onChangeText={setSearch}
+                placeholder="Buscar proyecto, empresa o etapa"
+                placeholderTextColor="#8d95a1"
+                style={styles.searchInput}
+                value={search}
               />
-            ))}
-          </View>
+              {search.length > 0 ? (
+                <Pressable onPress={() => setSearch("")} style={styles.clearButton}>
+                  <Ionicons name="close" size={18} color="#475467" />
+                </Pressable>
+              ) : null}
+            </View>
+
+            <ScrollView
+              contentContainerStyle={styles.tabsContent}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.tabs}
+            >
+              {projectTabs.map((item) => (
+                <Pressable
+                  key={String(item.key)}
+                  onPress={() => setTab(item.key)}
+                  style={[styles.tabButton, tab === item.key && styles.tabButtonActive]}
+                >
+                  <Text style={[styles.tabText, tab === item.key && styles.tabTextActive]}>
+                    {item.label}
+                  </Text>
+                  <Text style={[styles.tabCount, tab === item.key && styles.tabTextActive]}>
+                    {item.count}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {loading ? (
+              <View style={styles.stateCard}>
+                <ActivityIndicator color="#111" />
+                <Text style={styles.stateText}>Cargando proyectos...</Text>
+              </View>
+            ) : projectsWithFavorites.length === 0 ? (
+              <View style={styles.stateCard}>
+                <Ionicons name="folder-open-outline" size={34} color="#68707b" />
+                <Text style={styles.emptyTitle}>No hay proyectos visibles</Text>
+                <Text style={styles.stateText}>Tu usuario no tiene proyectos activos asignados.</Text>
+              </View>
+            ) : filteredProjects.length === 0 ? (
+              <View style={styles.stateCard}>
+                <Ionicons name="search-outline" size={34} color="#68707b" />
+                <Text style={styles.emptyTitle}>Sin resultados</Text>
+                <Text style={styles.stateText}>Prueba con otro estado o búsqueda.</Text>
+              </View>
+            ) : (
+              <View style={styles.list}>
+                {filteredProjects.map((project) => (
+                  <ProjectCard
+                    key={project.id}
+                    onPress={() => setSelectedProject({ project })}
+                    project={project}
+                  />
+                ))}
+              </View>
+            )}
+          </>
+        ) : mainTab === "tickets" ? (
+          <TicketsPanel
+            projects={projectsWithFavorites}
+            tickets={ticketsResult?.tickets}
+            user={user}
+          />
+        ) : (
+          <HoursPanel
+            onOpenTask={(projectId, taskId) => {
+              const project = projectsWithFavorites.find((item) => item.id === projectId);
+              if (project) setSelectedProject({ project, taskId });
+            }}
+            summary={workResult}
+            user={user}
+          />
         )}
       </ScrollView>
 
@@ -659,6 +971,328 @@ function Metric({
       <Ionicons name={icon} size={16} color="#667085" />
       <Text style={styles.metricLabel}>{label}</Text>
       <Text numberOfLines={1} style={styles.metricValue}>{value}</Text>
+    </View>
+  );
+}
+
+function TicketsPanel({
+  user,
+  tickets,
+  projects,
+}: {
+  user: SessionUser;
+  tickets?: TicketItem[];
+  projects: Project[];
+}) {
+  const createTicket = useMutation((api as any).mobile.createMobileTicket);
+  const updateStatus = useMutation((api as any).mobile.updateMobileTicketStatus);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [projectId, setProjectId] = useState<Id<"proyectos"> | null>(projects[0]?.id ?? null);
+  const [priority, setPriority] = useState<(typeof TICKET_PRIORITY_OPTIONS)[number]["key"]>("medium");
+  const [saving, setSaving] = useState(false);
+  const [updatingId, setUpdatingId] = useState<Id<"tickets"> | null>(null);
+
+  useEffect(() => {
+    if (!projectId && projects[0]?.id) setProjectId(projects[0].id);
+  }, [projectId, projects]);
+
+  const saveTicket = useCallback(async () => {
+    if (!title.trim()) {
+      Alert.alert("Falta título", "Ingresa el título del ticket.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await createTicket({
+        description: description.trim(),
+        priority,
+        profileId: user.id,
+        projectId: projectId ?? undefined,
+        title: title.trim(),
+        type: "support",
+      });
+      setTitle("");
+      setDescription("");
+      setPriority("medium");
+      setCreateOpen(false);
+    } catch (error) {
+      Alert.alert("No se pudo crear", error instanceof Error ? error.message : "Intenta de nuevo.");
+    } finally {
+      setSaving(false);
+    }
+  }, [createTicket, description, priority, projectId, title, user.id]);
+
+  const changeStatus = useCallback(
+    async (ticket: TicketItem, status: (typeof TICKET_STATUS_OPTIONS)[number]["key"]) => {
+      setUpdatingId(ticket.id);
+      try {
+        await updateStatus({ profileId: user.id, status, ticketId: ticket.id });
+      } catch (error) {
+        Alert.alert("No se pudo actualizar", error instanceof Error ? error.message : "Intenta de nuevo.");
+      } finally {
+        setUpdatingId(null);
+      }
+    },
+    [updateStatus, user.id],
+  );
+
+  if (tickets === undefined) {
+    return (
+      <View style={styles.stateCard}>
+        <ActivityIndicator color="#111" />
+        <Text style={styles.stateText}>Cargando tickets...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.panelStack}>
+      <Pressable onPress={() => setCreateOpen(true)} style={styles.primaryButton}>
+        <Text style={styles.primaryText}>Crear ticket</Text>
+        <Ionicons name="add" size={21} color="#111" />
+      </Pressable>
+
+      {tickets.length === 0 ? (
+        <View style={styles.stateCard}>
+          <Ionicons name="ticket-outline" size={34} color="#68707b" />
+          <Text style={styles.emptyTitle}>Sin tickets</Text>
+          <Text style={styles.stateText}>Crea el primer ticket desde la app.</Text>
+        </View>
+      ) : (
+        <View style={styles.list}>
+          {tickets.map((ticket) => (
+            <View key={ticket.id} style={styles.ticketCard}>
+              <View style={styles.projectHead}>
+                <View style={styles.projectTitleBox}>
+                  <Text numberOfLines={2} style={styles.taskTitle}>{ticket.title}</Text>
+                  <Text numberOfLines={1} style={styles.taskMeta}>
+                    {ticket.projectName} · {ticket.createdLabel}
+                  </Text>
+                </View>
+                <View style={[styles.chip, { backgroundColor: ticket.status === "cerrado" ? "#dcfae6" : "#fef0c7" }]}>
+                  <Text style={[styles.chipText, { color: ticket.status === "cerrado" ? "#067647" : "#b54708" }]}>
+                    {ticket.status}
+                  </Text>
+                </View>
+              </View>
+              {ticket.description ? (
+                <Text numberOfLines={3} style={styles.taskDescription}>{ticket.description}</Text>
+              ) : null}
+              <View style={styles.statusGrid}>
+                {TICKET_STATUS_OPTIONS.map((item) => (
+                  <Pressable
+                    disabled={updatingId != null}
+                    key={item.key}
+                    onPress={() => changeStatus(ticket, item.key)}
+                    style={[
+                      styles.statusOption,
+                      ticket.status === item.key && styles.statusOptionActive,
+                      updatingId === ticket.id && styles.pressed,
+                    ]}
+                  >
+                    <Text style={[
+                      styles.statusOptionText,
+                      ticket.status === item.key && styles.statusOptionTextActive,
+                    ]}>
+                      {item.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
+
+      <Modal animationType="slide" onRequestClose={() => setCreateOpen(false)} visible={createOpen}>
+        <SafeAreaView style={styles.modalRoot}>
+          <View style={styles.modalHeader}>
+            <Pressable onPress={() => setCreateOpen(false)} style={styles.backButton}>
+              <Ionicons name="close" size={24} color="#111" />
+            </Pressable>
+            <Text style={styles.modalTitle}>Crear ticket</Text>
+            <View style={styles.headerSpacer} />
+          </View>
+          <ScrollView contentContainerStyle={styles.modalContent}>
+            <View style={styles.field}>
+              <Text style={styles.label}>Título</Text>
+              <View style={styles.inputShell}>
+                <Ionicons name="ticket-outline" size={19} color="#7a8088" />
+                <TextInput
+                  onChangeText={setTitle}
+                  placeholder="Qué necesitas resolver"
+                  placeholderTextColor="#9aa0a8"
+                  style={styles.input}
+                  value={title}
+                />
+              </View>
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.label}>Descripción</Text>
+              <TextInput
+                multiline
+                onChangeText={setDescription}
+                placeholder="Contexto del ticket"
+                placeholderTextColor="#9aa0a8"
+                style={styles.textarea}
+                value={description}
+              />
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.label}>Proyecto</Text>
+              <View style={styles.statusGrid}>
+                {projects.slice(0, 8).map((project) => (
+                  <Pressable
+                    key={project.id}
+                    onPress={() => setProjectId(project.id)}
+                    style={[styles.statusOption, projectId === project.id && styles.statusOptionActive]}
+                  >
+                    <Text style={[styles.statusOptionText, projectId === project.id && styles.statusOptionTextActive]}>
+                      {project.name}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+            <View style={styles.field}>
+              <Text style={styles.label}>Prioridad</Text>
+              <View style={styles.statusGrid}>
+                {TICKET_PRIORITY_OPTIONS.map((item) => (
+                  <Pressable
+                    key={item.key}
+                    onPress={() => setPriority(item.key)}
+                    style={[styles.statusOption, priority === item.key && styles.statusOptionActive]}
+                  >
+                    <Text style={[styles.statusOptionText, priority === item.key && styles.statusOptionTextActive]}>
+                      {item.label}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+            <Pressable disabled={saving} onPress={saveTicket} style={[styles.primaryButton, saving && styles.pressed]}>
+              {saving ? <ActivityIndicator color="#111" /> : <Text style={styles.primaryText}>Guardar ticket</Text>}
+            </Pressable>
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
+    </View>
+  );
+}
+
+function HoursPanel({
+  user,
+  summary,
+  onOpenTask,
+}: {
+  user: SessionUser;
+  summary?: WorkSummary;
+  onOpenTask: (projectId: Id<"proyectos"> | null, taskId: Id<"tareas">) => void;
+}) {
+  const pauseTimer = useMutation((api as any).mobile.pauseTaskTimer);
+  const stopTimer = useMutation((api as any).mobile.stopTaskTimer);
+  const [busy, setBusy] = useState<"pause" | "stop" | null>(null);
+
+  const activeTaskId = summary?.activeTimer?.taskId;
+  const actOnTimer = useCallback(
+    async (action: "pause" | "stop") => {
+      if (!activeTaskId) return;
+      setBusy(action);
+      try {
+        const fn = action === "pause" ? pauseTimer : stopTimer;
+        await fn({ profileId: user.id, taskId: activeTaskId });
+      } catch (error) {
+        Alert.alert("No se pudo actualizar", error instanceof Error ? error.message : "Intenta de nuevo.");
+      } finally {
+        setBusy(null);
+      }
+    },
+    [activeTaskId, pauseTimer, stopTimer, user.id],
+  );
+
+  if (summary === undefined) {
+    return (
+      <View style={styles.stateCard}>
+        <ActivityIndicator color="#111" />
+        <Text style={styles.stateText}>Cargando horas...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.panelStack}>
+      <View style={styles.detailCard}>
+        <Text style={styles.sectionTitle}>Hoy</Text>
+        <Text style={styles.bigNumber}>{summary.todayLabel}</Text>
+        <Text style={styles.stateText}>Tiempo registrado en sesiones cerradas.</Text>
+      </View>
+
+      <View style={styles.detailCard}>
+        <Text style={styles.sectionTitle}>Timer activo</Text>
+        {summary.activeTimer ? (
+          <>
+            <Text style={styles.taskTitle}>{summary.activeTimer.taskTitle}</Text>
+            <Text style={styles.taskMeta}>{summary.activeTimer.projectName}</Text>
+            <Text style={styles.bigNumber}>{summary.activeTimer.workedLabel}</Text>
+            <View style={styles.inlineActions}>
+              <Pressable
+                disabled={busy != null}
+                onPress={() => actOnTimer("pause")}
+                style={styles.smallActionButton}
+              >
+                {busy === "pause" ? <ActivityIndicator color="#111" /> : <Ionicons name="pause" size={17} color="#111" />}
+                <Text style={styles.smallActionText}>Pausar</Text>
+              </Pressable>
+              <Pressable
+                disabled={busy != null}
+                onPress={() => actOnTimer("stop")}
+                style={styles.smallActionButton}
+              >
+                {busy === "stop" ? <ActivityIndicator color="#111" /> : <Ionicons name="stop" size={17} color="#111" />}
+                <Text style={styles.smallActionText}>Detener</Text>
+              </Pressable>
+            </View>
+          </>
+        ) : (
+          <Text style={styles.stateText}>No hay timer corriendo. Inicia uno desde el detalle de una tarea.</Text>
+        )}
+      </View>
+
+      {summary.pausedTimers.length > 0 ? (
+        <View style={styles.detailCard}>
+          <Text style={styles.sectionTitle}>Pausados</Text>
+          {summary.pausedTimers.map((timer) => (
+            <View key={timer.taskId} style={styles.attachmentRow}>
+              <Ionicons name="pause-circle-outline" size={18} color="#667085" />
+              <Text numberOfLines={1} style={styles.attachmentName}>{timer.taskTitle}</Text>
+              <Text style={styles.taskMeta}>{timer.workedLabel}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      <View style={styles.detailCard}>
+        <Text style={styles.sectionTitle}>Últimos registros</Text>
+        {summary.logs.length === 0 ? (
+          <Text style={styles.stateText}>Sin registros todavía.</Text>
+        ) : (
+          summary.logs.map((log) => (
+            <Pressable
+              key={log.id}
+              onPress={() => onOpenTask(null, log.id as unknown as Id<"tareas">)}
+              style={styles.logRow}
+            >
+              <View style={styles.projectTitleBox}>
+                <Text numberOfLines={1} style={styles.taskTitle}>{log.taskTitle}</Text>
+                <Text numberOfLines={1} style={styles.taskMeta}>{log.projectName} · {log.startedLabel}</Text>
+              </View>
+              <Text style={styles.metricValue}>{log.durationLabel}</Text>
+            </Pressable>
+          ))
+        )}
+      </View>
     </View>
   );
 }
