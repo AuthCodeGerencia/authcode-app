@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -58,6 +59,10 @@ type Project = {
   id: Id<"proyectos">;
   name: string;
   icon: string | null;
+  iconUrl?: string | null;
+  iconoUrl?: string | null;
+  imageUrl?: string | null;
+  logoUrl?: string | null;
   company: string;
   phase: string;
   dueDate: string;
@@ -71,6 +76,9 @@ type Project = {
 
 type ProjectTab = "todos" | "favoritos" | string;
 type DashboardTab = "proyectos" | "tareas" | "tickets" | "horas" | "briefs";
+type ProjectCreateTab = "info" | "equipo" | "fases" | "archivos";
+type ProjectCreateDropdown = "company" | "template" | "phase" | "lifecycle" | null;
+type ProjectLifecycle = "activo" | "inactivo";
 
 type TaskStatus =
   | "idea"
@@ -106,6 +114,30 @@ type ProjectMember = {
 type ProjectPhase = {
   index: number;
   name: string;
+};
+
+type ProjectPhaseDraft = {
+  name: string;
+  dueDate: string;
+  completed: boolean;
+};
+
+type ProjectCreateOptions = {
+  canCreate: boolean;
+  companies: Array<{ id: Id<"empresas">; name: string }>;
+  people: Array<{
+    id: Id<"profile">;
+    name: string;
+    email: string;
+    role: string;
+    companyId: Id<"empresas"> | null;
+  }>;
+  templates: Array<{
+    id: Id<"plantillasFasesProyecto">;
+    name: string;
+    phases: Array<{ name: string; dueDate: string }>;
+  }>;
+  defaultPhases: Array<{ nombre: string; fechaEstimada: string }>;
 };
 
 type ProfileDetail = {
@@ -281,6 +313,62 @@ type WorkSummary = {
   todayLabel: string;
 };
 
+const PROJECT_ICON_URL_FALLBACKS: Record<string, string> = {
+  j9785vast0syap1q3m183nmyt980pr20:
+    "https://unique-parakeet-602.convex.cloud/api/storage/a8e6a50d-60de-4212-9fee-b21285e894d1",
+  j97cbcfhrps7s4qa4rz1p4nrpx852nxy:
+    "https://unique-parakeet-602.convex.cloud/api/storage/88dc77d0-068f-474b-bbf0-1cc21588778b",
+  j97c848gxwaza6chfmxbq1qkmd8535ve:
+    "https://unique-parakeet-602.convex.cloud/api/storage/149c095c-c6ad-4015-a3b6-e819294fd8d6",
+  j977bhnn2f7wwwbzs7zmwxvd0n852464:
+    "https://unique-parakeet-602.convex.cloud/api/storage/c182d624-3436-41c7-938a-dec1e30a52e4",
+  j9777xkp4byafy67dtk74qye7h859nj7:
+    "https://unique-parakeet-602.convex.cloud/api/storage/800033f1-0047-4fd4-8533-a153dac64f41",
+  j976rqxyy7qx1w4z40fksq172n85br6w:
+    "https://unique-parakeet-602.convex.cloud/api/storage/543abc63-c10b-4ae2-983b-c9458be16229",
+  j97bfjh90egm5wr15hsear5xex882k1w:
+    "https://unique-parakeet-602.convex.cloud/api/storage/b3d94eb7-c7a5-4e38-a389-ea79698973e8",
+  j972ks7qtky0e1bbrpjby847fn89aq1w:
+    "https://unique-parakeet-602.convex.cloud/api/storage/633a3f8b-459f-4bb9-8567-38d63155a818",
+};
+
+const PROJECT_ICON_OPTIONS = [
+  "📁",
+  "🚀",
+  "🌐",
+  "📱",
+  "🛒",
+  "🎨",
+  "⚙️",
+  "📊",
+  "🏢",
+  "💡",
+  "🔧",
+  "📦",
+  "🍕",
+  "🏗️",
+  "🎯",
+  "🧩",
+  "💳",
+  "📣",
+  "🧪",
+  "🗂️",
+];
+
+const DEFAULT_PROJECT_PHASES: ProjectPhaseDraft[] = [
+  { name: "Diseño", dueDate: "", completed: false },
+  { name: "Aprobación", dueDate: "", completed: false },
+  { name: "Cambios de diseño", dueDate: "", completed: false },
+  { name: "Desarrollo", dueDate: "", completed: false },
+  { name: "Aprobado en desarrollo", dueDate: "", completed: false },
+  { name: "Deploy", dueDate: "", completed: false },
+];
+
+const PROJECT_LIFECYCLE_OPTIONS: Array<{ key: ProjectLifecycle; label: string }> = [
+  { key: "activo", label: "Activo" },
+  { key: "inactivo", label: "Inactivo" },
+];
+
 const TASK_STATUS_OPTIONS: Array<{ key: TaskStatus; label: string }> = [
   { key: "idea", label: "Idea" },
   { key: "pendiente", label: "Pendiente" },
@@ -324,6 +412,24 @@ async function pickAttachments() {
     size: asset.size,
     uri: asset.uri,
   }));
+}
+
+async function pickImageAttachment() {
+  const result = await DocumentPicker.getDocumentAsync({
+    copyToCacheDirectory: true,
+    multiple: false,
+    type: "image/*",
+  });
+
+  if (result.canceled || result.assets.length === 0) return null;
+
+  const asset = result.assets[0];
+  return {
+    mimeType: asset.mimeType,
+    name: asset.name,
+    size: asset.size,
+    uri: asset.uri,
+  };
 }
 
 async function uploadPickedAttachments(
@@ -699,6 +805,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     taskId?: Id<"tareas">;
   } | null>(null);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [pendingPushDestination, setPendingPushDestination] = useState<PushDestination | null>(null);
 
   useEffect(() => {
@@ -927,6 +1034,17 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
 
         {mainTab === "proyectos" ? (
           <>
+            <View style={styles.projectToolbar}>
+              <Text style={styles.sectionTitle}>Proyectos</Text>
+              <Pressable
+                onPress={() => setCreateProjectOpen(true)}
+                style={styles.smallActionButton}
+              >
+                <Ionicons name="add" size={18} color="#111" />
+                <Text style={styles.smallActionText}>Crear</Text>
+              </Pressable>
+            </View>
+
             <View style={styles.searchShell}>
               <Ionicons name="search-outline" size={19} color="#667085" />
               <TextInput
@@ -1048,6 +1166,15 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
         }}
         visible={notificationsOpen}
       />
+      <CreateProjectModal
+        onClose={() => setCreateProjectOpen(false)}
+        onCreated={() => {
+          setCreateProjectOpen(false);
+          setTab("todos");
+        }}
+        user={user}
+        visible={createProjectOpen}
+      />
     </SafeAreaView>
   );
 }
@@ -1068,50 +1195,105 @@ function bandColors(band: Project["band"]) {
   return { bg: "#eef2f6", fg: "#344054" };
 }
 
-function ProjectCard({ project, onPress }: { project: Project; onPress: () => void }) {
+function isImageUri(value?: string | null) {
+  if (!value) return false;
+  return /^(https?:|file:|data:image\/|blob:)/i.test(value);
+}
+
+function projectIconImageUri(project: Project) {
+  const candidates = [
+    project.iconUrl,
+    project.iconoUrl,
+    project.logoUrl,
+    project.imageUrl,
+    PROJECT_ICON_URL_FALLBACKS[project.id as string],
+    project.icon,
+  ];
+  return candidates.find(isImageUri) ?? null;
+}
+
+function ProjectIcon({ project }: { project: Project }) {
+  const imageUri = projectIconImageUri(project);
+  const iconName =
+    !imageUri && project.icon && project.icon in Ionicons.glyphMap
+      ? (project.icon as keyof typeof Ionicons.glyphMap)
+      : null;
+  const fallbackText =
+    project.icon && !imageUri && !iconName && project.icon.length <= 2
+      ? project.icon
+      : project.name.slice(0, 1).toUpperCase();
+
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.projectCard, pressed && styles.cardPressed]}>
+    <View style={styles.projectIcon}>
+      {imageUri ? (
+        <Image source={{ uri: imageUri }} style={styles.projectIconImage} />
+      ) : iconName ? (
+        <Ionicons name={iconName} size={23} color="#111" />
+      ) : (
+        <Text style={styles.projectIconText}>{fallbackText}</Text>
+      )}
+    </View>
+  );
+}
+
+function ProjectCard({ project, onPress }: { project: Project; onPress: () => void }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <View style={styles.projectCard}>
       <View style={styles.projectHead}>
-        <View style={styles.projectIcon}>
-          <Text style={styles.projectIconText}>{project.icon ?? "A"}</Text>
-        </View>
-        <View style={styles.projectTitleBox}>
-          <Text numberOfLines={1} style={styles.company}>{project.company}</Text>
-          <Text numberOfLines={2} style={styles.projectName}>{project.name}</Text>
-        </View>
-        {project.isFavorite ? (
-          <View style={styles.favoriteBadge}>
-            <Ionicons name="star" size={17} color="#111" />
+        <Pressable
+          onPress={onPress}
+          style={({ pressed }) => [styles.projectOpenArea, pressed && styles.cardPressed]}
+        >
+          <ProjectIcon project={project} />
+          <View style={styles.projectTitleBox}>
+            <Text numberOfLines={1} style={styles.company}>{project.company}</Text>
+            <Text numberOfLines={2} style={styles.projectName}>{project.name}</Text>
           </View>
-        ) : null}
-      </View>
-
-      <View style={styles.metaRow}>
-        <Ionicons name="git-branch-outline" size={16} color="#667085" />
-        <Text numberOfLines={1} style={styles.metaText}>{project.phase}</Text>
-      </View>
-
-      <View style={styles.progressTop}>
-        <Text style={styles.progressLabel}>Avance</Text>
-        <Text style={styles.progressNumber}>{project.percent}%</Text>
-      </View>
-      <View style={styles.track}>
-        <View style={[styles.fill, { width: `${project.percent}%` }]} />
-      </View>
-
-      <View style={styles.metrics}>
-        <Metric icon="calendar-outline" label="Entrega" value={project.dueDate} />
-        <Metric icon="list-outline" label="Pendientes" value={`${project.tasks.pending}/${project.tasks.total}`} />
-        <Metric icon="alert-circle-outline" label="Atrasadas" value={`${project.tasks.overdue}`} />
-      </View>
-
-      {project.url ? (
-        <Pressable onPress={() => Linking.openURL(project.url!)} style={styles.linkButton}>
-          <Ionicons name="open-outline" size={17} color="#111" />
-          <Text style={styles.linkButtonText}>Abrir sitio</Text>
         </Pressable>
+        <View style={styles.projectCardActions}>
+          {project.isFavorite ? (
+            <View style={styles.favoriteBadge}>
+              <Ionicons name="star" size={17} color="#111" />
+            </View>
+          ) : null}
+          <Pressable onPress={() => setExpanded((value) => !value)} style={styles.expandButton}>
+            <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={19} color="#111" />
+          </Pressable>
+        </View>
+      </View>
+
+      {expanded ? (
+        <View style={styles.projectDetails}>
+          <View style={styles.metaRow}>
+            <Ionicons name="git-branch-outline" size={16} color="#667085" />
+            <Text numberOfLines={1} style={styles.metaText}>{project.phase}</Text>
+          </View>
+
+          <View style={styles.progressTop}>
+            <Text style={styles.progressLabel}>Avance</Text>
+            <Text style={styles.progressNumber}>{project.percent}%</Text>
+          </View>
+          <View style={styles.track}>
+            <View style={[styles.fill, { width: `${project.percent}%` }]} />
+          </View>
+
+          <View style={styles.metrics}>
+            <Metric icon="calendar-outline" label="Entrega" value={project.dueDate} />
+            <Metric icon="list-outline" label="Pendientes" value={`${project.tasks.pending}/${project.tasks.total}`} />
+            <Metric icon="alert-circle-outline" label="Atrasadas" value={`${project.tasks.overdue}`} />
+          </View>
+
+          {project.url ? (
+            <Pressable onPress={() => Linking.openURL(project.url!)} style={styles.linkButton}>
+              <Ionicons name="open-outline" size={17} color="#111" />
+              <Text style={styles.linkButtonText}>Abrir sitio</Text>
+            </Pressable>
+          ) : null}
+        </View>
       ) : null}
-    </Pressable>
+    </View>
   );
 }
 
@@ -1130,6 +1312,748 @@ function Metric({
       <Text style={styles.metricLabel}>{label}</Text>
       <Text numberOfLines={1} style={styles.metricValue}>{value}</Text>
     </View>
+  );
+}
+
+function SelectDropdown<T extends string | number>({
+  allowClear = false,
+  icon,
+  label,
+  onClear,
+  onOpenChange,
+  onSelect,
+  open,
+  options,
+  value,
+  valueLabel,
+}: {
+  allowClear?: boolean;
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onClear?: () => void;
+  onOpenChange: (open: boolean) => void;
+  onSelect: (value: T) => void;
+  open: boolean;
+  options: Array<{ key: T; label: string }>;
+  value: T | null;
+  valueLabel: string;
+}) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.label}>{label}</Text>
+      <Pressable onPress={() => onOpenChange(!open)} style={styles.dropdownShell}>
+        <Ionicons name={icon} size={19} color="#7a8088" />
+        <Text numberOfLines={1} style={styles.dropdownValue}>{valueLabel}</Text>
+        {allowClear && value != null ? (
+          <Pressable
+            onPress={() => {
+              onClear?.();
+              onOpenChange(false);
+            }}
+            style={styles.dropdownClear}
+          >
+            <Ionicons name="close" size={16} color="#667085" />
+          </Pressable>
+        ) : null}
+        <Ionicons name={open ? "chevron-up" : "chevron-down"} size={18} color="#111" />
+      </Pressable>
+      {open ? (
+        <View style={styles.dropdownMenu}>
+          {options.map((item) => {
+            const active = item.key === value;
+            return (
+              <Pressable
+                key={String(item.key)}
+                onPress={() => {
+                  onSelect(item.key);
+                  onOpenChange(false);
+                }}
+                style={[styles.dropdownOption, active && styles.dropdownOptionActive]}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={[styles.dropdownOptionText, active && styles.dropdownOptionTextActive]}
+                >
+                  {item.label}
+                </Text>
+                {active ? <Ionicons name="checkmark" size={17} color="#111" /> : null}
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function MultiSelectDropdown<T extends string>({
+  icon,
+  label,
+  onOpenChange,
+  onToggle,
+  open,
+  options,
+  value,
+  valueLabel,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  onOpenChange: (open: boolean) => void;
+  onToggle: (value: T) => void;
+  open: boolean;
+  options: Array<{ key: T; label: string }>;
+  value: T[];
+  valueLabel: string;
+}) {
+  return (
+    <View style={styles.field}>
+      <Text style={styles.label}>{label}</Text>
+      <Pressable onPress={() => onOpenChange(!open)} style={styles.dropdownShell}>
+        <Ionicons name={icon} size={19} color="#7a8088" />
+        <Text numberOfLines={1} style={styles.dropdownValue}>{valueLabel}</Text>
+        <Ionicons name={open ? "chevron-up" : "chevron-down"} size={18} color="#111" />
+      </Pressable>
+      {open ? (
+        <View style={styles.dropdownMenu}>
+          {options.map((item) => {
+            const active = value.includes(item.key);
+            return (
+              <Pressable
+                key={String(item.key)}
+                onPress={() => onToggle(item.key)}
+                style={[styles.dropdownOption, active && styles.dropdownOptionActive]}
+              >
+                <Text
+                  numberOfLines={1}
+                  style={[styles.dropdownOptionText, active && styles.dropdownOptionTextActive]}
+                >
+                  {item.label}
+                </Text>
+                <Ionicons
+                  name={active ? "checkbox" : "square-outline"}
+                  size={17}
+                  color={active ? "#111" : "#98a2b3"}
+                />
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+function CreateProjectModal({
+  user,
+  visible,
+  onClose,
+  onCreated,
+}: {
+  user: SessionUser;
+  visible: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const options = useQuery(
+    (api as any).mobile.getProjectCreateOptions,
+    visible ? { profileId: user.id } : "skip",
+  ) as ProjectCreateOptions | undefined;
+  const createProject = useMutation((api as any).mobile.createProject);
+  const generateUploadUrl = useMutation((api as any).mobile.generateMobileUploadUrl);
+  const [tab, setTab] = useState<ProjectCreateTab>("info");
+  const [openDropdown, setOpenDropdown] = useState<ProjectCreateDropdown>(null);
+  const [name, setName] = useState("");
+  const [icon, setIcon] = useState("");
+  const [iconImage, setIconImage] = useState<PickedAttachment | null>(null);
+  const [companyId, setCompanyId] = useState<Id<"empresas"> | null>(null);
+  const [ownerIds, setOwnerIds] = useState<Id<"profile">[]>([user.id]);
+  const [teamIds, setTeamIds] = useState<Id<"profile">[]>([]);
+  const [lifecycle, setLifecycle] = useState<ProjectLifecycle>("activo");
+  const [url, setUrl] = useState("");
+  const [notes, setNotes] = useState("");
+  const [templateKey, setTemplateKey] = useState("__default__");
+  const [phases, setPhases] = useState<ProjectPhaseDraft[]>(DEFAULT_PROJECT_PHASES);
+  const [currentPhaseIndex, setCurrentPhaseIndex] = useState(0);
+  const [documents, setDocuments] = useState<PickedAttachment[]>([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!visible) return;
+    setTab("info");
+    setOpenDropdown(null);
+    setName("");
+    setIcon("");
+    setIconImage(null);
+    setCompanyId(null);
+    setOwnerIds([user.id]);
+    setTeamIds([]);
+    setLifecycle("activo");
+    setUrl("");
+    setNotes("");
+    setTemplateKey("__default__");
+    setPhases(DEFAULT_PROJECT_PHASES.map((phase) => ({ ...phase })));
+    setCurrentPhaseIndex(0);
+    setDocuments([]);
+    setSaving(false);
+  }, [user.id, visible]);
+
+  useEffect(() => {
+    if (!visible || companyId || !options?.companies.length) return;
+    setCompanyId(options.companies[0].id);
+  }, [companyId, options?.companies, visible]);
+
+  const companyOptions = useMemo(
+    () => (options?.companies ?? []).map((company) => ({ key: company.id, label: company.name })),
+    [options?.companies],
+  );
+  const templateOptions = useMemo(
+    () => [
+      { key: "__default__", label: "Predeterminada" },
+      ...(options?.templates ?? []).map((template) => ({
+        key: template.id as string,
+        label: template.name,
+      })),
+    ],
+    [options?.templates],
+  );
+  const ownerOptions = useMemo(
+    () =>
+      (options?.people ?? [])
+        .filter(
+          (person) =>
+            person.role === "admin" ||
+            (person.role === "encargado" &&
+              (!companyId || person.companyId === companyId)),
+        )
+        .map((person) => ({
+          key: person.id,
+          label: `${person.name}${person.role ? ` · ${person.role}` : ""}`,
+        })),
+    [companyId, options?.people],
+  );
+  const teamOptions = useMemo(
+    () =>
+      (options?.people ?? [])
+        .filter((person) => ["programador", "empleado", "diseñador"].includes(person.role))
+        .map((person) => ({
+          key: person.id,
+          label: `${person.name}${person.role ? ` · ${person.role}` : ""}`,
+        })),
+    [options?.people],
+  );
+  const selectedCompany = companyOptions.find((item) => item.key === companyId);
+  const selectedLifecycle = PROJECT_LIFECYCLE_OPTIONS.find((item) => item.key === lifecycle);
+  const selectedTemplate = templateOptions.find((item) => item.key === templateKey);
+  const selectedPhase = phases[currentPhaseIndex];
+  const phaseOptions = phases.map((phase, index) => ({
+    key: index,
+    label: phase.name.trim() || `Fase ${index + 1}`,
+  }));
+  const selectedOwners = ownerOptions.filter((item) => ownerIds.includes(item.key));
+  const selectedTeam = teamOptions.filter((item) => teamIds.includes(item.key));
+
+  const applyTemplate = useCallback(
+    (key: string) => {
+      setTemplateKey(key);
+      if (key === "__default__") {
+        setPhases(DEFAULT_PROJECT_PHASES.map((phase) => ({ ...phase })));
+        setCurrentPhaseIndex(0);
+        return;
+      }
+      const template = options?.templates.find((item) => item.id === key);
+      if (!template) return;
+      setPhases(
+        template.phases.map((phase) => ({
+          completed: false,
+          dueDate: phase.dueDate ?? "",
+          name: phase.name,
+        })),
+      );
+      setCurrentPhaseIndex(0);
+    },
+    [options?.templates],
+  );
+
+  const toggleId = useCallback(
+    (id: Id<"profile">, setter: (value: Id<"profile">[]) => void, current: Id<"profile">[]) => {
+      setter(current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+    },
+    [],
+  );
+
+  const setPhase = useCallback((index: number, patch: Partial<ProjectPhaseDraft>) => {
+    setPhases((current) =>
+      current.map((phase, phaseIndex) =>
+        phaseIndex === index ? { ...phase, ...patch } : phase,
+      ),
+    );
+  }, []);
+
+  const movePhase = useCallback((index: number, direction: -1 | 1) => {
+    setPhases((current) => {
+      const nextIndex = index + direction;
+      if (nextIndex < 0 || nextIndex >= current.length) return current;
+      const next = [...current];
+      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
+      setCurrentPhaseIndex((currentIndex) => {
+        if (currentIndex === index) return nextIndex;
+        if (currentIndex === nextIndex) return index;
+        return currentIndex;
+      });
+      return next;
+    });
+  }, []);
+
+  const removePhase = useCallback((index: number) => {
+    setPhases((current) => {
+      const next = current.filter((_, phaseIndex) => phaseIndex !== index);
+      setCurrentPhaseIndex((currentIndex) => Math.min(currentIndex, Math.max(0, next.length - 1)));
+      return next.length > 0 ? next : [{ name: "", dueDate: "", completed: false }];
+    });
+  }, []);
+
+  const pickIcon = useCallback(async () => {
+    try {
+      const image = await pickImageAttachment();
+      if (!image) return;
+      setIconImage(image);
+      setIcon("");
+    } catch (error) {
+      Alert.alert("No se pudo seleccionar", error instanceof Error ? error.message : "Intenta de nuevo.");
+    }
+  }, []);
+
+  const pickDocuments = useCallback(async () => {
+    try {
+      const attachments = await pickAttachments();
+      if (attachments.length === 0) return;
+      setDocuments((current) => [...current, ...attachments]);
+    } catch (error) {
+      Alert.alert("No se pudo seleccionar", error instanceof Error ? error.message : "Intenta de nuevo.");
+    }
+  }, []);
+
+  const save = useCallback(async () => {
+    const cleanName = name.trim();
+    if (!cleanName) {
+      Alert.alert("Falta nombre", "Ingresa el nombre del proyecto.");
+      return;
+    }
+    if (!companyId) {
+      Alert.alert("Falta empresa", "Selecciona una empresa.");
+      return;
+    }
+
+    const cleanPhases = phases
+      .map((phase) => ({
+        completed: phase.completed,
+        dueDate: phase.dueDate.trim(),
+        name: phase.name.trim(),
+      }))
+      .filter((phase) => phase.name.length > 0);
+    if (cleanPhases.length === 0) {
+      Alert.alert("Faltan fases", "Agrega al menos una fase.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const iconUpload =
+        iconImage != null
+          ? await uploadPickedAttachments([iconImage], () =>
+              generateUploadUrl({ profileId: user.id }),
+            )
+          : null;
+      const documentUpload =
+        documents.length > 0
+          ? await uploadPickedAttachments(documents, () =>
+              generateUploadUrl({ profileId: user.id }),
+            )
+          : { storageIds: [] };
+
+      await createProject({
+        companyId,
+        currentPhaseIndex,
+        documentation: documentUpload.storageIds,
+        icon: icon.trim() || undefined,
+        iconoStorageId: iconUpload?.storageIds[0],
+        lifecycle,
+        name: cleanName,
+        notes: notes.trim() || undefined,
+        ownerIds,
+        phases: cleanPhases.map((phase) => ({
+          completada: phase.completed,
+          fechaEstimada: phase.dueDate,
+          nombre: phase.name,
+        })),
+        profileId: user.id,
+        teamIds,
+        url: url.trim() || undefined,
+      });
+      onCreated();
+    } catch (error) {
+      Alert.alert("No se pudo crear", error instanceof Error ? error.message : "Intenta de nuevo.");
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    companyId,
+    createProject,
+    currentPhaseIndex,
+    documents,
+    generateUploadUrl,
+    icon,
+    iconImage,
+    lifecycle,
+    name,
+    notes,
+    onCreated,
+    ownerIds,
+    phases,
+    teamIds,
+    url,
+    user.id,
+  ]);
+
+  const modalTabs = [
+    { key: "info" as const, label: "Info", icon: "information-circle-outline" as const },
+    { key: "equipo" as const, label: "Equipo", icon: "people-outline" as const },
+    { key: "fases" as const, label: "Fases", icon: "git-branch-outline" as const },
+    { key: "archivos" as const, label: "Archivos", icon: "folder-open-outline" as const },
+  ];
+
+  return (
+    <Modal animationType="slide" onRequestClose={onClose} visible={visible}>
+      <SafeAreaView style={styles.modalRoot}>
+        <View style={styles.modalHeader}>
+          <Pressable onPress={onClose} style={styles.backButton}>
+            <Ionicons name="close" size={24} color="#111" />
+          </Pressable>
+          <Text style={styles.modalTitle}>Crear proyecto</Text>
+          <View style={styles.headerSpacer} />
+        </View>
+
+        <ScrollView contentContainerStyle={styles.modalContent}>
+          {options === undefined ? (
+            <View style={styles.stateCard}>
+              <ActivityIndicator color="#111" />
+              <Text style={styles.stateText}>Cargando opciones...</Text>
+            </View>
+          ) : !options.canCreate ? (
+            <View style={styles.stateCard}>
+              <Ionicons name="lock-closed-outline" size={34} color="#68707b" />
+              <Text style={styles.emptyTitle}>Sin permiso</Text>
+              <Text style={styles.stateText}>Tu perfil no puede crear proyectos.</Text>
+            </View>
+          ) : (
+            <>
+              <ScrollView
+                contentContainerStyle={styles.projectTabsContent}
+                horizontal
+                showsHorizontalScrollIndicator={false}
+              >
+                {modalTabs.map((item) => {
+                  const active = tab === item.key;
+                  return (
+                    <Pressable
+                      key={item.key}
+                      onPress={() => setTab(item.key)}
+                      style={[styles.projectTabButton, active && styles.projectTabButtonActive]}
+                    >
+                      <Ionicons name={item.icon} size={16} color="#111" />
+                      <Text style={[styles.projectTabText, active && styles.projectTabTextActive]}>
+                        {item.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+
+              {tab === "info" ? (
+                <>
+                  <View style={styles.projectIconPicker}>
+                    <View style={styles.projectIconLarge}>
+                      {iconImage ? (
+                        <Image source={{ uri: iconImage.uri }} style={styles.projectIconImage} />
+                      ) : (
+                        <Text style={styles.projectIconLargeText}>{icon || "P"}</Text>
+                      )}
+                    </View>
+                    <View style={styles.projectIconPickerBody}>
+                      <View style={styles.iconSwatchGrid}>
+                        {PROJECT_ICON_OPTIONS.map((item) => {
+                          const active = icon === item && !iconImage;
+                          return (
+                            <Pressable
+                              key={item}
+                              onPress={() => {
+                                setIcon(active ? "" : item);
+                                setIconImage(null);
+                              }}
+                              style={[styles.iconSwatch, active && styles.iconSwatchActive]}
+                            >
+                              <Text style={styles.iconSwatchText}>{item}</Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                      <View style={styles.inlineActions}>
+                        <Pressable onPress={pickIcon} style={styles.smallActionButton}>
+                          <Ionicons name="image-outline" size={17} color="#111" />
+                          <Text style={styles.smallActionText}>Imagen</Text>
+                        </Pressable>
+                        {iconImage ? (
+                          <Pressable
+                            onPress={() => setIconImage(null)}
+                            style={styles.secondarySmallButton}
+                          >
+                            <Ionicons name="trash-outline" size={17} color="#b42318" />
+                          </Pressable>
+                        ) : null}
+                      </View>
+                    </View>
+                  </View>
+
+                  <View style={styles.field}>
+                    <Text style={styles.label}>Nombre</Text>
+                    <View style={styles.inputShell}>
+                      <Ionicons name="folder-outline" size={19} color="#7a8088" />
+                      <TextInput
+                        onChangeText={setName}
+                        placeholder="Nombre del proyecto"
+                        placeholderTextColor="#9aa0a8"
+                        style={styles.input}
+                        value={name}
+                      />
+                    </View>
+                  </View>
+
+                  <SelectDropdown
+                    icon="business-outline"
+                    label="Empresa"
+                    onOpenChange={(open) => setOpenDropdown(open ? "company" : null)}
+                    onSelect={(value) => setCompanyId(value)}
+                    open={openDropdown === "company"}
+                    options={companyOptions}
+                    value={companyId}
+                    valueLabel={selectedCompany?.label ?? "Seleccionar empresa"}
+                  />
+
+                  <SelectDropdown
+                    icon="pulse-outline"
+                    label="Estado del proyecto"
+                    onOpenChange={(open) => setOpenDropdown(open ? "lifecycle" : null)}
+                    onSelect={setLifecycle}
+                    open={openDropdown === "lifecycle"}
+                    options={PROJECT_LIFECYCLE_OPTIONS}
+                    value={lifecycle}
+                    valueLabel={selectedLifecycle?.label ?? "Activo"}
+                  />
+
+                  <SelectDropdown
+                    icon="flag-outline"
+                    label="Etapa inicial"
+                    onOpenChange={(open) => setOpenDropdown(open ? "phase" : null)}
+                    onSelect={setCurrentPhaseIndex}
+                    open={openDropdown === "phase"}
+                    options={phaseOptions}
+                    value={currentPhaseIndex}
+                    valueLabel={selectedPhase?.name || "Seleccionar fase"}
+                  />
+
+                  <View style={styles.field}>
+                    <Text style={styles.label}>URL</Text>
+                    <View style={styles.inputShell}>
+                      <Ionicons name="link-outline" size={19} color="#7a8088" />
+                      <TextInput
+                        autoCapitalize="none"
+                        onChangeText={setUrl}
+                        placeholder="https://..."
+                        placeholderTextColor="#9aa0a8"
+                        style={styles.input}
+                        value={url}
+                      />
+                    </View>
+                  </View>
+
+                  <View style={styles.field}>
+                    <Text style={styles.label}>Notas</Text>
+                    <TextInput
+                      multiline
+                      onChangeText={setNotes}
+                      placeholder="Notas internas del proyecto"
+                      placeholderTextColor="#9aa0a8"
+                      style={styles.textarea}
+                      value={notes}
+                    />
+                  </View>
+                </>
+              ) : null}
+
+              {tab === "equipo" ? (
+                <>
+                  <MultiSelectDropdown
+                    icon="person-circle-outline"
+                    label="Encargados"
+                    onOpenChange={(open) => setOpenDropdown(open ? "company" : null)}
+                    onToggle={(value) => toggleId(value, setOwnerIds, ownerIds)}
+                    open={openDropdown === "company"}
+                    options={ownerOptions}
+                    value={ownerIds}
+                    valueLabel={
+                      selectedOwners.length > 0
+                        ? selectedOwners.map((item) => item.label.split(" · ")[0]).join(", ")
+                        : "Sin encargados"
+                    }
+                  />
+                  <MultiSelectDropdown
+                    icon="construct-outline"
+                    label="Equipo"
+                    onOpenChange={(open) => setOpenDropdown(open ? "template" : null)}
+                    onToggle={(value) => toggleId(value, setTeamIds, teamIds)}
+                    open={openDropdown === "template"}
+                    options={teamOptions}
+                    value={teamIds}
+                    valueLabel={
+                      selectedTeam.length > 0
+                        ? selectedTeam.map((item) => item.label.split(" · ")[0]).join(", ")
+                        : "Sin equipo"
+                    }
+                  />
+                </>
+              ) : null}
+
+              {tab === "fases" ? (
+                <>
+                  <SelectDropdown
+                    icon="albums-outline"
+                    label="Plantilla"
+                    onOpenChange={(open) => setOpenDropdown(open ? "template" : null)}
+                    onSelect={applyTemplate}
+                    open={openDropdown === "template"}
+                    options={templateOptions}
+                    value={templateKey}
+                    valueLabel={selectedTemplate?.label ?? "Predeterminada"}
+                  />
+                  <View style={styles.phaseEditorList}>
+                    {phases.map((phase, index) => (
+                      <View key={`${index}-${phase.name}`} style={styles.phaseEditorRow}>
+                        <View style={styles.phaseMoveButtons}>
+                          <Pressable onPress={() => movePhase(index, -1)} style={styles.inlineIconButton}>
+                            <Ionicons name="chevron-up" size={16} color="#111" />
+                          </Pressable>
+                          <Pressable onPress={() => movePhase(index, 1)} style={styles.inlineIconButton}>
+                            <Ionicons name="chevron-down" size={16} color="#111" />
+                          </Pressable>
+                        </View>
+                        <View style={styles.phaseEditorFields}>
+                          <TextInput
+                            onChangeText={(value) => setPhase(index, { name: value })}
+                            placeholder="Nombre de fase"
+                            placeholderTextColor="#9aa0a8"
+                            style={styles.compactInput}
+                            value={phase.name}
+                          />
+                          <TextInput
+                            autoCapitalize="none"
+                            onChangeText={(value) => setPhase(index, { dueDate: value })}
+                            placeholder="YYYY-MM-DD"
+                            placeholderTextColor="#9aa0a8"
+                            style={styles.compactInput}
+                            value={phase.dueDate}
+                          />
+                        </View>
+                        <View style={styles.phaseRowActions}>
+                          <Pressable
+                            onPress={() => setPhase(index, { completed: !phase.completed })}
+                            style={[
+                              styles.inlineIconButton,
+                              phase.completed && styles.inlineIconButtonActive,
+                            ]}
+                          >
+                            <Ionicons name="checkmark" size={16} color="#111" />
+                          </Pressable>
+                          <Pressable onPress={() => removePhase(index)} style={styles.inlineIconButton}>
+                            <Ionicons name="trash-outline" size={16} color="#b42318" />
+                          </Pressable>
+                        </View>
+                      </View>
+                    ))}
+                  </View>
+                  <Pressable
+                    onPress={() =>
+                      setPhases((current) => [
+                        ...current,
+                        { completed: false, dueDate: "", name: "" },
+                      ])
+                    }
+                    style={styles.secondaryButton}
+                  >
+                    <Ionicons name="add" size={18} color="#111" />
+                    <Text style={styles.secondaryButtonText}>Agregar fase</Text>
+                  </Pressable>
+                </>
+              ) : null}
+
+              {tab === "archivos" ? (
+                <>
+                  <Pressable onPress={pickDocuments} style={styles.dropdownShell}>
+                    <Ionicons name="cloud-upload-outline" size={19} color="#7a8088" />
+                    <Text style={styles.dropdownValue}>Subir documentación</Text>
+                    <Ionicons name="add" size={18} color="#111" />
+                  </Pressable>
+                  {documents.length > 0 ? (
+                    <View style={styles.selectedAttachments}>
+                      {documents.map((attachment, index) => (
+                        <View key={`${attachment.uri}-${index}`} style={styles.selectedAttachment}>
+                          <Ionicons name="document-attach-outline" size={18} color="#667085" />
+                          <View style={styles.selectedAttachmentTextBox}>
+                            <Text numberOfLines={1} style={styles.attachmentName}>{attachment.name}</Text>
+                            <Text style={styles.attachmentMeta}>{formatFileSize(attachment.size)}</Text>
+                          </View>
+                          <Pressable
+                            onPress={() =>
+                              setDocuments((current) =>
+                                current.filter((_, attachmentIndex) => attachmentIndex !== index),
+                              )
+                            }
+                            style={styles.inlineIconButton}
+                          >
+                            <Ionicons name="close" size={16} color="#111" />
+                          </Pressable>
+                        </View>
+                      ))}
+                    </View>
+                  ) : (
+                    <View style={styles.stateCard}>
+                      <Ionicons name="folder-open-outline" size={34} color="#68707b" />
+                      <Text style={styles.stateText}>Sin documentación seleccionada.</Text>
+                    </View>
+                  )}
+                </>
+              ) : null}
+
+              <View style={styles.modalFooter}>
+                <Pressable disabled={saving} onPress={onClose} style={styles.secondaryButton}>
+                  <Ionicons name="close" size={18} color="#111" />
+                  <Text style={styles.secondaryButtonText}>Cancelar</Text>
+                </Pressable>
+                <Pressable disabled={saving} onPress={save} style={[styles.primaryButton, styles.modalSaveButton, saving && styles.pressed]}>
+                  {saving ? (
+                    <ActivityIndicator color="#111" />
+                  ) : (
+                    <>
+                      <Text style={styles.primaryText}>Crear proyecto</Text>
+                      <Ionicons name="checkmark" size={20} color="#111" />
+                    </>
+                  )}
+                </Pressable>
+              </View>
+            </>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
   );
 }
 
@@ -3341,14 +4265,23 @@ const styles = StyleSheet.create({
   stateText: { color: "#667085", fontSize: 14, lineHeight: 20, textAlign: "center" },
   panelStack: { gap: 14 },
   list: { gap: 14 },
-  projectCard: { backgroundColor: "#fff", borderColor: "#ece7da", borderRadius: 18, borderWidth: 1, gap: 14, padding: 16 },
+  projectToolbar: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  projectCard: { backgroundColor: "#fff", borderColor: "#ece7da", borderRadius: 8, borderWidth: 1, gap: 14, padding: 16 },
   cardPressed: { opacity: 0.72 },
   projectHead: { alignItems: "flex-start", flexDirection: "row", gap: 12 },
-  projectIcon: { alignItems: "center", backgroundColor: "#f6de39", borderRadius: 14, height: 44, justifyContent: "center", width: 44 },
+  projectOpenArea: { alignItems: "flex-start", flex: 1, flexDirection: "row", gap: 12, minWidth: 0 },
+  projectIcon: { alignItems: "center", backgroundColor: "#f6de39", borderRadius: 8, height: 44, justifyContent: "center", overflow: "hidden", width: 44 },
+  projectIconImage: { height: "100%", resizeMode: "cover", width: "100%" },
   projectIconText: { color: "#111", fontSize: 20, fontWeight: "900" },
   projectTitleBox: { flex: 1, minWidth: 0 },
   company: { color: "#7b7264", fontSize: 12, fontWeight: "800", marginBottom: 3 },
   projectName: { color: "#111", fontSize: 18, fontWeight: "900", lineHeight: 22 },
+  projectCardActions: { alignItems: "center", flexDirection: "row", gap: 8 },
   favoriteBadge: {
     alignItems: "center",
     backgroundColor: "#f6de39",
@@ -3357,6 +4290,17 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     width: 32,
   },
+  expandButton: {
+    alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 32,
+    justifyContent: "center",
+    width: 32,
+  },
+  projectDetails: { gap: 12 },
   chip: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
   chipText: { fontSize: 12, fontWeight: "900" },
   phaseChip: {
@@ -3523,6 +4467,143 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     width: 30,
   },
+  inlineIconButtonActive: { backgroundColor: "#fff7c2", borderColor: "#111" },
+  secondarySmallButton: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 34,
+    justifyContent: "center",
+    width: 38,
+  },
+  dropdownShell: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 50,
+    paddingHorizontal: 12,
+  },
+  dropdownValue: { color: "#111", flex: 1, fontSize: 14, fontWeight: "800" },
+  dropdownClear: {
+    alignItems: "center",
+    height: 28,
+    justifyContent: "center",
+    width: 28,
+  },
+  dropdownMenu: {
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    gap: 4,
+    marginTop: 6,
+    padding: 6,
+  },
+  dropdownOption: {
+    alignItems: "center",
+    borderRadius: 8,
+    flexDirection: "row",
+    gap: 8,
+    minHeight: 40,
+    paddingHorizontal: 10,
+  },
+  dropdownOptionActive: { backgroundColor: "#fff7c2" },
+  dropdownOptionText: { color: "#475467", flex: 1, fontSize: 13, fontWeight: "800" },
+  dropdownOptionTextActive: { color: "#111" },
+  projectTabsContent: { gap: 8, paddingRight: 6 },
+  projectTabButton: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 6,
+    minHeight: 40,
+    paddingHorizontal: 11,
+  },
+  projectTabButtonActive: { backgroundColor: "#f6de39", borderColor: "#111" },
+  projectTabText: { color: "#475467", fontSize: 13, fontWeight: "800" },
+  projectTabTextActive: { color: "#111" },
+  projectIconPicker: {
+    alignItems: "flex-start",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 12,
+    padding: 12,
+  },
+  projectIconLarge: {
+    alignItems: "center",
+    backgroundColor: "#f6de39",
+    borderRadius: 8,
+    height: 58,
+    justifyContent: "center",
+    overflow: "hidden",
+    width: 58,
+  },
+  projectIconLargeText: { color: "#111", fontSize: 26, fontWeight: "900" },
+  projectIconPickerBody: { flex: 1, gap: 10, minWidth: 0 },
+  iconSwatchGrid: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  iconSwatch: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    height: 34,
+    justifyContent: "center",
+    width: 34,
+  },
+  iconSwatchActive: { backgroundColor: "#fff7c2", borderColor: "#111" },
+  iconSwatchText: { fontSize: 17 },
+  phaseEditorList: { gap: 10 },
+  phaseEditorRow: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 9,
+    padding: 10,
+  },
+  phaseMoveButtons: { gap: 6 },
+  phaseEditorFields: { flex: 1, gap: 8, minWidth: 0 },
+  phaseRowActions: { gap: 6 },
+  compactInput: {
+    backgroundColor: "#f7f7f5",
+    borderColor: "#e6e2d6",
+    borderRadius: 8,
+    borderWidth: 1,
+    color: "#111",
+    fontSize: 13,
+    minHeight: 38,
+    paddingHorizontal: 10,
+  },
+  secondaryButton: {
+    alignItems: "center",
+    backgroundColor: "#fff",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: 8,
+    justifyContent: "center",
+    minHeight: 44,
+    paddingHorizontal: 14,
+  },
+  secondaryButtonText: { color: "#111", fontSize: 13, fontWeight: "900" },
+  modalFooter: { flexDirection: "row", gap: 10, marginTop: 4 },
+  modalSaveButton: { flex: 1 },
   commentBubble: {
     backgroundColor: "#f8f7f2",
     borderRadius: 14,
