@@ -45,6 +45,22 @@
           "color": "#111111",
           "defaultChannel": "default"
         }
+      ],
+      [
+        "expo-widgets",
+        {
+          "bundleIdentifier": "com.authcodetechnologies.authcodeapp.widgets",
+          "groupIdentifier": "group.com.authcodetechnologies.authcodeapp",
+          "frequentUpdates": true,
+          "widgets": [
+            {
+              "name": "AuthcodeTimer",
+              "displayName": "Authcode Timer",
+              "description": "Timer activo de Authcode",
+              "supportedFamilies": ["systemSmall"]
+            }
+          ]
+        }
       ]
     ]
   }
