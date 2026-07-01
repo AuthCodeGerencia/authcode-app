@@ -771,9 +771,12 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     if (workResult === undefined) return;
     const activeTimer = workResult.activeTimer;
     if (!activeTimer) {
-      endTimerLiveActivity().catch(() => {});
-      return;
+      const id = setTimeout(() => {
+        endTimerLiveActivity().catch(() => {});
+      }, 90000);
+      return () => clearTimeout(id);
     }
+
     startOrUpdateTimerLiveActivity(
       timerLiveActivityProps({
         mode: activeTimer.mode,
@@ -793,7 +796,6 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     workResult?.activeTimer?.taskTitle,
     workResult?.activeTimer?.workedMs,
   ]);
-
   const projectTabs = useMemo(() => {
     const phases = [...new Set(projectsWithFavorites.map((project) => project.phase))];
     return [
@@ -1702,32 +1704,33 @@ function HoursPanel({
   summary?: WorkSummary;
   onOpenTask: (projectId: Id<"proyectos"> | null, taskId: Id<"tareas">) => void;
 }) {
+  const startTimer = useMutation((api as any).mobile.startTaskTimer);
   const pauseTimer = useMutation((api as any).mobile.pauseTaskTimer);
   const stopTimer = useMutation((api as any).mobile.stopTaskTimer);
-  const [busy, setBusy] = useState<"pause" | "stop" | "live" | null>(null);
+  const [busy, setBusy] = useState<"start" | "pause" | "stop" | "live" | null>(null);
 
   const activeTaskId = summary?.activeTimer?.taskId;
   const activeWorkedMs = useLiveWorkedMs(summary?.activeTimer);
   const actOnTimer = useCallback(
-    async (action: "pause" | "stop") => {
+    async (action: "start" | "pause" | "stop") => {
       if (!activeTaskId) return;
       setBusy(action);
       try {
-        const fn = action === "pause" ? pauseTimer : stopTimer;
+        const fn = action === "start" ? startTimer : action === "pause" ? pauseTimer : stopTimer;
         await fn({ profileId: user.id, taskId: activeTaskId });
         const activeTimer = summary?.activeTimer;
         if (activeTimer) {
           const props = timerLiveActivityProps({
-            mode: "paused",
+            mode: action === "pause" ? "paused" : "running",
             projectName: activeTimer.projectName,
             taskId: activeTimer.taskId,
             taskTitle: activeTimer.taskTitle,
             workedMs: activeTimer.workedMs,
           });
-          if (action === "pause") {
-            await startOrUpdateTimerLiveActivity(props);
-          } else {
+          if (action === "stop") {
             await endTimerLiveActivity(props);
+          } else {
+            await startOrUpdateTimerLiveActivity(props);
           }
         }
       } catch (error) {
@@ -1736,7 +1739,7 @@ function HoursPanel({
         setBusy(null);
       }
     },
-    [activeTaskId, pauseTimer, stopTimer, summary?.activeTimer, user.id],
+    [activeTaskId, pauseTimer, startTimer, stopTimer, summary?.activeTimer, user.id],
   );
   const restartLiveActivity = useCallback(async () => {
     const activeTimer = summary?.activeTimer;
@@ -1789,14 +1792,25 @@ function HoursPanel({
             <Text style={styles.taskMeta}>{summary.activeTimer.projectName}</Text>
             <Text style={styles.bigNumber}>{formatDurationClock(activeWorkedMs)}</Text>
             <View style={styles.inlineActions}>
-              <Pressable
-                disabled={busy != null}
-                onPress={() => actOnTimer("pause")}
-                style={styles.smallActionButton}
-              >
-                {busy === "pause" ? <ActivityIndicator color="#111" /> : <Ionicons name="pause" size={17} color="#111" />}
-                <Text style={styles.smallActionText}>Pausar</Text>
-              </Pressable>
+              {summary.activeTimer.mode === "running" ? (
+                <Pressable
+                  disabled={busy != null}
+                  onPress={() => actOnTimer("pause")}
+                  style={styles.smallActionButton}
+                >
+                  {busy === "pause" ? <ActivityIndicator color="#111" /> : <Ionicons name="pause" size={17} color="#111" />}
+                  <Text style={styles.smallActionText}>Pausar</Text>
+                </Pressable>
+              ) : (
+                <Pressable
+                  disabled={busy != null}
+                  onPress={() => actOnTimer("start")}
+                  style={styles.smallActionButton}
+                >
+                  {busy === "start" ? <ActivityIndicator color="#111" /> : <Ionicons name="play" size={17} color="#111" />}
+                  <Text style={styles.smallActionText}>Reanudar</Text>
+                </Pressable>
+              )}
               <Pressable
                 disabled={busy != null}
                 onPress={() => actOnTimer("stop")}
@@ -2733,9 +2747,10 @@ function TaskDetailModal({
   );
 
   const activeForThisTask = Boolean(
-    taskId && workSummary?.activeTimer?.taskId === taskId,
+    taskId && String(workSummary?.activeTimer?.taskId ?? "") === String(taskId),
   );
   const timerMode = activeForThisTask ? workSummary?.activeTimer?.mode : null;
+  const canStartOrResumeTimer = !activeForThisTask || timerMode !== "running";
   const detailWorkedMs = useLiveWorkedMs(activeForThisTask ? workSummary?.activeTimer : null);
   const runTimerAction = useCallback(
     async (action: "start" | "pause" | "stop") => {
@@ -2819,14 +2834,16 @@ function TaskDetailModal({
                   </Text>
                 </View>
                 <View style={styles.inlineActions}>
-                  <Pressable
-                    disabled={timerAction != null}
-                    onPress={() => runTimerAction("start")}
-                    style={styles.smallActionButton}
-                  >
-                    {timerAction === "start" ? <ActivityIndicator color="#111" /> : <Ionicons name="play" size={17} color="#111" />}
-                    <Text style={styles.smallActionText}>{activeForThisTask ? "Reanudar" : "Iniciar"}</Text>
-                  </Pressable>
+                  {canStartOrResumeTimer ? (
+                    <Pressable
+                      disabled={timerAction != null}
+                      onPress={() => runTimerAction("start")}
+                      style={styles.smallActionButton}
+                    >
+                      {timerAction === "start" ? <ActivityIndicator color="#111" /> : <Ionicons name="play" size={17} color="#111" />}
+                      <Text style={styles.smallActionText}>{activeForThisTask ? "Reanudar" : "Iniciar"}</Text>
+                    </Pressable>
+                  ) : null}
                   {activeForThisTask ? (
                     <>
                       <Pressable

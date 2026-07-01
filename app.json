@@ -6,9 +6,6 @@
     "icon": "./assets/icon.png",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "splash": {
-      "backgroundColor": "#0f0f0f"
-    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -57,9 +54,18 @@
               "name": "AuthcodeTimer",
               "displayName": "Authcode Timer",
               "description": "Timer activo de Authcode",
-              "supportedFamilies": ["systemSmall"]
+              "supportedFamilies": [
+                "systemSmall"
+              ]
             }
           ]
+        }
+      ],
+      "expo-status-bar",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0f0f0f"
         }
       ]
     ]
