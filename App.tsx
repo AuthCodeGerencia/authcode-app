@@ -76,9 +76,11 @@ type Project = {
 
 type ProjectTab = "todos" | "favoritos" | string;
 type DashboardTab = "proyectos" | "tareas" | "tickets" | "horas" | "briefs";
+type ProjectSectionTab = "tareas" | "etapas" | "equipo" | "tickets" | "avances";
 type ProjectCreateTab = "info" | "equipo" | "fases" | "archivos";
 type ProjectCreateDropdown = "company" | "template" | "phase" | "lifecycle" | null;
 type ProjectLifecycle = "activo" | "inactivo";
+type TaskFormDropdown = "status" | "priority" | "phase" | "owners" | null;
 
 type TaskStatus =
   | "idea"
@@ -463,6 +465,20 @@ async function uploadPickedAttachments(
   return { names, storageIds };
 }
 
+function createdTaskIdFromResult(result: unknown) {
+  if (typeof result === "string") return result as Id<"tareas">;
+  if (result && typeof result === "object") {
+    const task = result as {
+      _id?: Id<"tareas">;
+      id?: Id<"tareas">;
+      taskId?: Id<"tareas">;
+      tareaId?: Id<"tareas">;
+    };
+    return task.taskId ?? task.tareaId ?? task.id ?? task._id ?? null;
+  }
+  return null;
+}
+
 function ticketStatusLabel(status: string) {
   if (status === "open" || status === "abierto") return "Abierto";
   if (status === "in_progress" || status === "en_proceso") return "En proceso";
@@ -798,7 +814,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
   );
   const loading = result === undefined;
   const [search, setSearch] = useState("");
-  const [tab, setTab] = useState<ProjectTab>("todos");
+  const [tab, setTab] = useState<ProjectTab>("favoritos");
   const [mainTab, setMainTab] = useState<DashboardTab>("proyectos");
   const [selectedProject, setSelectedProject] = useState<{
     project: Project;
@@ -903,26 +919,35 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     workResult?.activeTimer?.taskTitle,
     workResult?.activeTimer?.workedMs,
   ]);
+  const sortedProjects = useMemo(
+    () =>
+      [...projectsWithFavorites].sort((a, b) => {
+        if (a.isFavorite !== b.isFavorite) return a.isFavorite ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      }),
+    [projectsWithFavorites],
+  );
+
   const projectTabs = useMemo(() => {
-    const phases = [...new Set(projectsWithFavorites.map((project) => project.phase))];
+    const phases = [...new Set(sortedProjects.map((project) => project.phase))];
     return [
-      { key: "todos" as ProjectTab, label: "Todos", count: projectsWithFavorites.length },
       {
         key: "favoritos" as ProjectTab,
         label: "Favoritos",
-        count: projectsWithFavorites.filter((project) => project.isFavorite).length,
+        count: sortedProjects.filter((project) => project.isFavorite).length,
       },
+      { key: "todos" as ProjectTab, label: "Todos", count: sortedProjects.length },
       ...phases.map((phase) => ({
         key: phase,
         label: phase,
-        count: projectsWithFavorites.filter((project) => project.phase === phase).length,
+        count: sortedProjects.filter((project) => project.phase === phase).length,
       })),
     ];
-  }, [projectsWithFavorites]);
+  }, [sortedProjects]);
 
   const filteredProjects = useMemo(() => {
     const term = search.trim().toLowerCase();
-    return projectsWithFavorites.filter((project) => {
+    return sortedProjects.filter((project) => {
       const byTab =
         tab === "todos" || (tab === "favoritos" ? project.isFavorite : project.phase === tab);
       const bySearch =
@@ -932,7 +957,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
         project.phase.toLowerCase().includes(term);
       return byTab && bySearch;
     });
-  }, [projectsWithFavorites, search, tab]);
+  }, [search, sortedProjects, tab]);
 
   const stats = useMemo(
     () => ({
@@ -944,7 +969,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
     [projectsWithFavorites],
   );
   const dashboardTabs = [
-    { key: "proyectos" as const, label: "Proy.", count: projectsWithFavorites.length },
+    { key: "proyectos" as const, label: "Proyectos", count: projectsWithFavorites.length },
     { key: "tareas" as const, label: "Tareas", count: assignedTasksResult?.counts.total ?? 0 },
     { key: "tickets" as const, label: "Tickets", count: ticketsResult?.tickets.length ?? 0 },
     { key: "horas" as const, label: "Horas", count: workResult?.logs.length ?? 0 },
@@ -974,6 +999,13 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
   if (selectedProject) {
     return (
       <TasksScreen
+        onProjectRenamed={(name) =>
+          setSelectedProject((current) =>
+            current
+              ? { ...current, project: { ...current.project, name } }
+              : current,
+          )
+        }
         onBack={() => setSelectedProject(null)}
         initialTaskId={selectedProject.taskId}
         project={selectedProject.project}
@@ -1170,6 +1202,7 @@ function Dashboard({ user, onLogout }: { user: SessionUser; onLogout: () => Prom
         onClose={() => setCreateProjectOpen(false)}
         onCreated={() => {
           setCreateProjectOpen(false);
+          setMainTab("proyectos");
           setTab("todos");
         }}
         user={user}
@@ -2814,6 +2847,10 @@ function TaskFormFields({
   phases,
   members,
   statusLabel = "Estado",
+  attachments,
+  onPickAttachments,
+  onRemoveAttachment,
+  attachmentsDisabled = false,
 }: {
   title: string;
   onTitleChange: (value: string) => void;
@@ -2834,7 +2871,17 @@ function TaskFormFields({
   phases: ProjectPhase[];
   members: ProjectMember[];
   statusLabel?: string;
+  attachments?: PickedAttachment[];
+  onPickAttachments?: () => void | Promise<void>;
+  onRemoveAttachment?: (index: number) => void;
+  attachmentsDisabled?: boolean;
 }) {
+  const [openDropdown, setOpenDropdown] = useState<TaskFormDropdown>(null);
+  const selectedStatus = TASK_STATUS_OPTIONS.find((item) => item.key === status);
+  const selectedPriority = PRIORITY_OPTIONS.find((item) => item.key === priority);
+  const selectedPhase = phases.find((phase) => phase.index === phaseIndex);
+  const selectedOwners = members.filter((member) => ownerIds.includes(member.id));
+
   return (
     <>
       <View style={styles.field}>
@@ -2863,55 +2910,29 @@ function TaskFormFields({
         />
       </View>
 
-      <View style={styles.field}>
-        <Text style={styles.label}>{statusLabel}</Text>
-        <View style={styles.statusGrid}>
-          {TASK_STATUS_OPTIONS.map((item) => (
-            <Pressable
-              key={item.key}
-              onPress={() => onStatusChange(item.key)}
-              style={[
-                styles.statusOption,
-                status === item.key && styles.statusOptionActive,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.statusOptionText,
-                  status === item.key && styles.statusOptionTextActive,
-                ]}
-              >
-                {item.label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      </View>
+      <SelectDropdown
+        icon="flag-outline"
+        label={statusLabel}
+        onOpenChange={(open) => setOpenDropdown(open ? "status" : null)}
+        onSelect={(value) => onStatusChange(value)}
+        open={openDropdown === "status"}
+        options={TASK_STATUS_OPTIONS}
+        value={status}
+        valueLabel={selectedStatus?.label ?? "Seleccionar estado"}
+      />
 
-      <View style={styles.field}>
-        <Text style={styles.label}>Prioridad</Text>
-        <View style={styles.statusGrid}>
-          {PRIORITY_OPTIONS.map((item) => (
-            <Pressable
-              key={item.key}
-              onPress={() => onPriorityChange(priority === item.key ? null : item.key)}
-              style={[
-                styles.statusOption,
-                priority === item.key && styles.statusOptionActive,
-              ]}
-            >
-              <Text
-                style={[
-                  styles.statusOptionText,
-                  priority === item.key && styles.statusOptionTextActive,
-                ]}
-              >
-                {item.label}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      </View>
+      <SelectDropdown
+        allowClear
+        icon="alert-circle-outline"
+        label="Prioridad"
+        onClear={() => onPriorityChange(null)}
+        onOpenChange={(open) => setOpenDropdown(open ? "priority" : null)}
+        onSelect={(value) => onPriorityChange(value)}
+        open={openDropdown === "priority"}
+        options={PRIORITY_OPTIONS}
+        value={priority}
+        valueLabel={selectedPriority?.label ?? "Sin prioridad"}
+      />
 
       <View style={styles.field}>
         <Text style={styles.label}>Etiqueta</Text>
@@ -2943,57 +2964,81 @@ function TaskFormFields({
       </View>
 
       {phases.length > 0 ? (
-        <View style={styles.field}>
-          <Text style={styles.label}>Fase</Text>
-          <View style={styles.statusGrid}>
-            {phases.map((phase) => (
-              <Pressable
-                key={phase.index}
-                onPress={() => onPhaseIndexChange(phase.index)}
-                style={[
-                  styles.statusOption,
-                  phaseIndex === phase.index && styles.statusOptionActive,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.statusOptionText,
-                    phaseIndex === phase.index && styles.statusOptionTextActive,
-                  ]}
-                >
-                  {phase.name}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
+        <SelectDropdown
+          icon="layers-outline"
+          label="Fase"
+          onOpenChange={(open) => setOpenDropdown(open ? "phase" : null)}
+          onSelect={(value) => onPhaseIndexChange(value)}
+          open={openDropdown === "phase"}
+          options={phases.map((phase) => ({ key: phase.index, label: phase.name }))}
+          value={phaseIndex}
+          valueLabel={selectedPhase?.name ?? "Seleccionar fase"}
+        />
       ) : null}
 
       {members.length > 0 ? (
+        <MultiSelectDropdown
+          icon="people-outline"
+          label="Encargados"
+          onOpenChange={(open) => setOpenDropdown(open ? "owners" : null)}
+          onToggle={(memberId) =>
+            onOwnerIdsChange(
+              ownerIds.includes(memberId)
+                ? ownerIds.filter((id) => id !== memberId)
+                : [...ownerIds, memberId],
+            )
+          }
+          open={openDropdown === "owners"}
+          options={members.map((member) => ({ key: member.id, label: member.name }))}
+          value={ownerIds}
+          valueLabel={
+            selectedOwners.length > 0
+              ? selectedOwners.map((member) => member.name).join(", ")
+              : "Sin encargados"
+          }
+        />
+      ) : null}
+
+      {attachments && onPickAttachments ? (
         <View style={styles.field}>
-          <Text style={styles.label}>Encargados</Text>
-          <View style={styles.statusGrid}>
-            {members.map((member) => {
-              const active = ownerIds.includes(member.id);
-              return (
-                <Pressable
-                  key={member.id}
-                  onPress={() =>
-                    onOwnerIdsChange(
-                      active
-                        ? ownerIds.filter((id) => id !== member.id)
-                        : [...ownerIds, member.id],
-                    )
-                  }
-                  style={[styles.statusOption, active && styles.statusOptionActive]}
-                >
-                  <Text style={[styles.statusOptionText, active && styles.statusOptionTextActive]}>
-                    {member.name}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          <Text style={styles.label}>Adjuntos</Text>
+          <Pressable
+            disabled={attachmentsDisabled}
+            onPress={onPickAttachments}
+            style={[styles.dropdownShell, attachmentsDisabled && styles.pressed]}
+          >
+            <Ionicons name="attach" size={19} color="#7a8088" />
+            <Text numberOfLines={1} style={styles.dropdownValue}>
+              {attachments.length > 0
+                ? `${attachments.length} archivo${attachments.length === 1 ? "" : "s"} seleccionado${attachments.length === 1 ? "" : "s"}`
+                : "Adjuntar archivos"}
+            </Text>
+            <Ionicons name="add" size={18} color="#111" />
+          </Pressable>
+          {attachments.length > 0 ? (
+            <View style={styles.selectedAttachments}>
+              {attachments.map((attachment, index) => (
+                <View key={`${attachment.uri}-${index}`} style={styles.selectedAttachment}>
+                  <Ionicons name="document-attach-outline" size={16} color="#667085" />
+                  <View style={styles.selectedAttachmentTextBox}>
+                    <Text numberOfLines={1} style={styles.attachmentName}>{attachment.name}</Text>
+                    {attachment.size ? (
+                      <Text style={styles.attachmentMeta}>{formatFileSize(attachment.size)}</Text>
+                    ) : null}
+                  </View>
+                  {onRemoveAttachment ? (
+                    <Pressable
+                      disabled={attachmentsDisabled}
+                      onPress={() => onRemoveAttachment(index)}
+                      style={styles.inlineIconButton}
+                    >
+                      <Ionicons name="close" size={17} color="#111" />
+                    </Pressable>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          ) : null}
         </View>
       ) : null}
     </>
@@ -3005,11 +3050,13 @@ function TasksScreen({
   project,
   initialTaskId,
   onBack,
+  onProjectRenamed,
 }: {
   user: SessionUser;
   project: Project;
   initialTaskId?: Id<"tareas">;
   onBack: () => void;
+  onProjectRenamed?: (name: string) => void;
 }) {
   const result = useQuery(api.mobile.getProjectTasks, {
     profileId: user.id,
@@ -3021,9 +3068,16 @@ function TasksScreen({
   }) as ProjectDetail | undefined;
   const createTask = useMutation(api.mobile.createProjectTask);
   const createAvance = useMutation((api as any).mobile.createMobileAvance);
+  const updateProjectName = useMutation((api as any).mobile.updateProjectName);
+  const generateUploadUrl = useMutation((api as any).mobile.generateMobileUploadUrl);
+  const addTaskAttachments = useMutation(api.tareas.addAdjuntosToTarea);
+  const [sectionTab, setSectionTab] = useState<ProjectSectionTab>("tareas");
   const [statusTab, setStatusTab] = useState<"todas" | TaskStatus>("todas");
   const [createOpen, setCreateOpen] = useState(false);
   const [avanceOpen, setAvanceOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
+  const [projectName, setProjectName] = useState(project.name);
+  const [projectNameDraft, setProjectNameDraft] = useState(project.name);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [newStatus, setNewStatus] = useState<TaskStatus>("pendiente");
@@ -3032,19 +3086,56 @@ function TasksScreen({
   const [dueDate, setDueDate] = useState("");
   const [phaseIndex, setPhaseIndex] = useState<number | null>(null);
   const [ownerIds, setOwnerIds] = useState<Id<"profile">[]>([user.id]);
+  const [newTaskAttachments, setNewTaskAttachments] = useState<PickedAttachment[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<Id<"tareas"> | null>(
     initialTaskId ?? null,
   );
   const [saving, setSaving] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [avanceTitle, setAvanceTitle] = useState("");
   const [avanceDescription, setAvanceDescription] = useState("");
   const [avanceStatus, setAvanceStatus] = useState("En progreso");
   const [avancePhaseIndex, setAvancePhaseIndex] = useState<number | null>(null);
   const [savingAvance, setSavingAvance] = useState(false);
 
+  useEffect(() => {
+    setProjectName(project.name);
+    setProjectNameDraft(project.name);
+  }, [project.name]);
+
   const tasks = (result?.tasks ?? []) as Task[];
   const members = (result?.members ?? []) as ProjectMember[];
   const phases = (result?.phases ?? []) as ProjectPhase[];
+  const projectTabs = useMemo(
+    () => [
+      { key: "tareas" as const, label: "Tareas", count: tasks.length, icon: "checkbox-outline" as const },
+      {
+        key: "etapas" as const,
+        label: "Etapas",
+        count: projectDetail?.phases.length ?? phases.length,
+        icon: "layers-outline" as const,
+      },
+      {
+        key: "equipo" as const,
+        label: "Equipo",
+        count: projectDetail?.members.length ?? members.length,
+        icon: "people-outline" as const,
+      },
+      {
+        key: "tickets" as const,
+        label: "Tickets",
+        count: projectDetail?.tickets.length ?? 0,
+        icon: "ticket-outline" as const,
+      },
+      {
+        key: "avances" as const,
+        label: "Avances",
+        count: projectDetail?.avances.length ?? 0,
+        icon: "analytics-outline" as const,
+      },
+    ],
+    [members.length, phases.length, projectDetail, tasks.length],
+  );
   const statusTabs = useMemo(
     () => [
       { key: "todas" as const, label: "Todas", count: tasks.length },
@@ -3069,10 +3160,10 @@ function TasksScreen({
 
     setSaving(true);
     try {
-      await createTask({
+      const createdTask = await createTask({
         profileId: user.id,
         projectId: project.id,
-        title,
+        title: title.trim(),
         description: description.trim() || undefined,
         status: newStatus,
         priority: priority ?? undefined,
@@ -3081,6 +3172,22 @@ function TasksScreen({
         phaseIndex: phaseIndex ?? undefined,
         ownerIds,
       });
+      const createdTaskId = createdTaskIdFromResult(createdTask);
+
+      if (newTaskAttachments.length > 0) {
+        if (!createdTaskId) {
+          throw new Error("La tarea se creó, pero no se recibió el id para adjuntar archivos.");
+        }
+        const uploaded = await uploadPickedAttachments(newTaskAttachments, () =>
+          generateUploadUrl({ profileId: user.id }),
+        );
+        await addTaskAttachments({
+          adjuntoNombres: uploaded.names,
+          adjuntos: uploaded.storageIds,
+          tareaId: createdTaskId,
+        });
+      }
+
       setTitle("");
       setDescription("");
       setNewStatus("pendiente");
@@ -3089,6 +3196,7 @@ function TasksScreen({
       setDueDate("");
       setPhaseIndex(null);
       setOwnerIds([user.id]);
+      setNewTaskAttachments([]);
       setCreateOpen(false);
     } catch (error) {
       Alert.alert(
@@ -3098,7 +3206,48 @@ function TasksScreen({
     } finally {
       setSaving(false);
     }
-  }, [createTask, description, dueDate, newStatus, ownerIds, phaseIndex, priority, project.id, tag, title, user.id]);
+  }, [addTaskAttachments, createTask, description, dueDate, generateUploadUrl, newStatus, newTaskAttachments, ownerIds, phaseIndex, priority, project.id, tag, title, user.id]);
+
+  const pickNewTaskAttachments = useCallback(async () => {
+    try {
+      const attachments = await pickAttachments();
+      if (attachments.length === 0) return;
+      setNewTaskAttachments((current) => [...current, ...attachments]);
+    } catch (error) {
+      Alert.alert(
+        "No se pudo seleccionar el archivo",
+        error instanceof Error ? error.message : "Intenta de nuevo.",
+      );
+    }
+  }, []);
+
+  const saveProjectName = useCallback(async () => {
+    const cleanName = projectNameDraft.trim();
+    if (!cleanName) {
+      Alert.alert("Falta nombre", "Ingresa el nombre del proyecto.");
+      return;
+    }
+
+    setRenaming(true);
+    try {
+      await updateProjectName({
+        name: cleanName,
+        profileId: user.id,
+        projectId: project.id,
+      });
+      setProjectName(cleanName);
+      setProjectNameDraft(cleanName);
+      onProjectRenamed?.(cleanName);
+      setRenameOpen(false);
+    } catch (error) {
+      Alert.alert(
+        "No se pudo renombrar",
+        error instanceof Error ? error.message : "Intenta de nuevo.",
+      );
+    } finally {
+      setRenaming(false);
+    }
+  }, [onProjectRenamed, project.id, projectNameDraft, updateProjectName, user.id]);
 
   const saveAvance = useCallback(async () => {
     if (!avanceTitle.trim()) {
@@ -3135,86 +3284,225 @@ function TasksScreen({
           <Pressable onPress={onBack} style={styles.backButton}>
             <Ionicons name="chevron-back" size={24} color="#111" />
           </Pressable>
+          <ProjectIcon project={project} />
           <View style={styles.detailTitleBox}>
             <Text numberOfLines={1} style={styles.company}>{project.company}</Text>
-            <Text numberOfLines={2} style={styles.detailTitle}>{project.name}</Text>
+            <Text numberOfLines={2} style={styles.detailTitle}>{projectName}</Text>
           </View>
+          <Pressable
+            onPress={() => {
+              setProjectNameDraft(projectName);
+              setRenameOpen(true);
+            }}
+            style={styles.backButton}
+          >
+            <Ionicons name="create-outline" size={22} color="#111" />
+          </Pressable>
           <Pressable onPress={() => setCreateOpen(true)} style={styles.addButton}>
             <Ionicons name="add" size={25} color="#111" />
           </Pressable>
         </View>
 
         <View style={styles.projectMini}>
-          <Text style={styles.projectMiniLabel}>Etapa actual</Text>
-          <Text style={styles.projectMiniValue}>{result?.project.phase ?? project.phase}</Text>
-          <View style={styles.progressTop}>
-            <Text style={styles.progressLabel}>Avance del proyecto</Text>
-            <Text style={styles.progressNumber}>{project.percent}%</Text>
+          <View style={styles.projectSummaryTop}>
+            <View style={styles.projectTitleBox}>
+              <Text style={styles.projectMiniLabel}>Etapa actual</Text>
+              <Text numberOfLines={1} style={styles.projectMiniValue}>
+                {result?.project.phase ?? project.phase}
+              </Text>
+            </View>
+            <View style={styles.projectPercentPill}>
+              <Text style={styles.projectPercentText}>{project.percent}%</Text>
+            </View>
           </View>
           <View style={styles.track}>
             <View style={[styles.fill, { width: `${project.percent}%` }]} />
           </View>
-          {projectDetail?.notes ? (
-            <Text style={styles.taskDescription}>{projectDetail.notes}</Text>
-          ) : null}
         </View>
 
-        {projectDetail ? (
+        <ScrollView
+          contentContainerStyle={styles.projectTabsContent}
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.projectTabs}
+        >
+          {projectTabs.map((item) => {
+            const active = sectionTab === item.key;
+            return (
+              <Pressable
+                key={item.key}
+                onPress={() => setSectionTab(item.key)}
+                style={[styles.projectTabButton, active && styles.projectTabButtonActive]}
+              >
+                <Ionicons name={item.icon} size={16} color={active ? "#111" : "#667085"} />
+                <Text style={[styles.projectTabText, active && styles.projectTabTextActive]}>
+                  {item.label}
+                </Text>
+                <Text style={[styles.projectTabCount, active && styles.projectTabTextActive]}>
+                  {item.count}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
+        {sectionTab === "tareas" ? (
           <>
-            <View style={styles.detailCard}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Fases</Text>
-                <Text style={styles.taskMeta}>{projectDetail.lifecycle}</Text>
+            <View style={styles.taskSectionHeader}>
+              <Text style={styles.sectionTitle}>Tareas</Text>
+              <Pressable onPress={() => setCreateOpen(true)} style={styles.smallActionButton}>
+                <Ionicons name="add" size={17} color="#111" />
+                <Text style={styles.smallActionText}>Nueva</Text>
+              </Pressable>
+            </View>
+
+            <ScrollView
+              contentContainerStyle={styles.tabsContent}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.tabs}
+            >
+              {statusTabs.map((item) => (
+                <Pressable
+                  key={item.key}
+                  onPress={() => setStatusTab(item.key)}
+                  style={[styles.tabButton, statusTab === item.key && styles.tabButtonActive]}
+                >
+                  <Text style={[styles.tabText, statusTab === item.key && styles.tabTextActive]}>
+                    {item.label}
+                  </Text>
+                  <Text style={[styles.tabCount, statusTab === item.key && styles.tabTextActive]}>
+                    {item.count}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            {result === undefined ? (
+              <View style={styles.stateCard}>
+                <ActivityIndicator color="#111" />
+                <Text style={styles.stateText}>Cargando tareas...</Text>
               </View>
-              <View style={styles.phaseList}>
-                {projectDetail.phases.map((phase) => (
-                  <View key={phase.index} style={[styles.phaseRow, phase.active && styles.phaseRowActive]}>
-                    <View style={[styles.taskStatusDot, { backgroundColor: phase.completed ? "#067647" : phase.active ? "#111" : "#98a2b3" }]} />
+            ) : filteredTasks.length === 0 ? (
+              <View style={styles.stateCard}>
+                <Ionicons name="checkbox-outline" size={34} color="#68707b" />
+                <Text style={styles.emptyTitle}>Sin tareas</Text>
+                <Text style={styles.stateText}>Crea una tarea desde el campo superior.</Text>
+              </View>
+            ) : (
+              <View style={styles.list}>
+                {filteredTasks.map((task) => (
+                  <TaskRow key={task.id} onPress={() => setSelectedTaskId(task.id)} task={task} />
+                ))}
+              </View>
+            )}
+          </>
+        ) : null}
+
+        {sectionTab !== "tareas" && !projectDetail ? (
+          <View style={styles.stateCard}>
+            <ActivityIndicator color="#111" />
+            <Text style={styles.stateText}>Cargando proyecto...</Text>
+          </View>
+        ) : null}
+
+        {sectionTab === "etapas" && projectDetail ? (
+          <View style={styles.detailCard}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Etapas</Text>
+              <Text style={styles.taskMeta}>{projectDetail.lifecycle}</Text>
+            </View>
+            <View style={styles.phaseList}>
+              {projectDetail.phases.map((phase) => (
+                <View key={phase.index} style={[styles.phaseRow, phase.active && styles.phaseRowActive]}>
+                  <View style={[styles.taskStatusDot, { backgroundColor: phase.completed ? "#067647" : phase.active ? "#111" : "#98a2b3" }]} />
+                  <View style={styles.projectTitleBox}>
+                    <Text numberOfLines={1} style={styles.infoTitle}>{phase.name}</Text>
+                    <Text style={styles.taskMeta}>{phase.dueDate || "Sin fecha"}</Text>
+                  </View>
+                  {phase.active ? (
+                    <Text style={styles.activeLabel}>Actual</Text>
+                  ) : null}
+                </View>
+              ))}
+            </View>
+          </View>
+        ) : null}
+
+        {sectionTab === "equipo" && projectDetail ? (
+          <View style={styles.detailCard}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Equipo</Text>
+              <Text style={styles.taskMeta}>{projectDetail.members.length}</Text>
+            </View>
+            {projectDetail.members.length === 0 ? (
+              <Text style={styles.stateText}>Sin encargados en este proyecto.</Text>
+            ) : (
+              <View style={styles.infoList}>
+                {projectDetail.members.map((member) => (
+                  <View key={member.id} style={styles.memberRow}>
+                    <View style={styles.memberAvatar}>
+                      <Text style={styles.memberInitial}>{member.name.slice(0, 1).toUpperCase()}</Text>
+                    </View>
                     <View style={styles.projectTitleBox}>
-                      <Text numberOfLines={1} style={styles.taskTitle}>{phase.name}</Text>
-                      <Text style={styles.taskMeta}>{phase.dueDate || "Sin fecha"}</Text>
+                      <Text numberOfLines={1} style={styles.infoTitle}>{member.name}</Text>
+                      <Text numberOfLines={1} style={styles.taskMeta}>{member.role || "Equipo"}</Text>
                     </View>
                   </View>
                 ))}
               </View>
-            </View>
+            )}
+          </View>
+        ) : null}
 
-            <View style={styles.detailCard}>
-              <Text style={styles.sectionTitle}>Equipo</Text>
-              <View style={styles.statusGrid}>
-                {projectDetail.members.map((member) => (
-                  <View key={member.id} style={styles.statusOption}>
-                    <Text style={styles.statusOptionText}>{member.name}</Text>
-                    <Text numberOfLines={1} style={styles.attachmentMeta}>{member.role}</Text>
+        {sectionTab === "tickets" && projectDetail ? (
+          <View style={styles.detailCard}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Tickets recientes</Text>
+              <Text style={styles.taskMeta}>{projectDetail.tickets.length}</Text>
+            </View>
+            {projectDetail.tickets.length === 0 ? (
+              <Text style={styles.stateText}>Sin tickets para este proyecto.</Text>
+            ) : (
+              <View style={styles.infoList}>
+                {projectDetail.tickets.map((ticket) => (
+                  <View key={ticket.id} style={styles.infoRow}>
+                    <Ionicons name="ticket-outline" size={18} color="#667085" />
+                    <View style={styles.projectTitleBox}>
+                      <Text numberOfLines={1} style={styles.infoTitle}>{ticket.title}</Text>
+                      <Text numberOfLines={1} style={styles.taskMeta}>
+                        {ticket.status} · {ticket.priority || "Sin prioridad"} · {ticket.createdLabel}
+                      </Text>
+                    </View>
                   </View>
                 ))}
               </View>
-            </View>
+            )}
+          </View>
+        ) : null}
 
-            <View style={styles.detailCard}>
-              <View style={styles.sectionHeader}>
-                <Text style={styles.sectionTitle}>Tickets recientes</Text>
-                <Text style={styles.taskMeta}>{projectDetail.tickets.length}</Text>
+        {sectionTab === "avances" && projectDetail ? (
+          <View style={styles.detailCard}>
+            <View style={styles.progressBlock}>
+              <View style={styles.progressTop}>
+                <Text style={styles.progressLabel}>Avance del proyecto</Text>
+                <Text style={styles.progressNumber}>{project.percent}%</Text>
               </View>
-              {projectDetail.tickets.length === 0 ? (
-                <Text style={styles.stateText}>Sin tickets para este proyecto.</Text>
-              ) : (
-                projectDetail.tickets.map((ticket) => (
-                  <View key={ticket.id} style={styles.attachmentRow}>
-                    <Ionicons name="ticket-outline" size={18} color="#667085" />
-                    <Text numberOfLines={1} style={styles.attachmentName}>{ticket.title}</Text>
-                    <Text style={styles.taskMeta}>{ticketStatusLabel(ticket.status)}</Text>
-                  </View>
-                ))
-              )}
+              <View style={styles.track}>
+                <View style={[styles.fill, { width: `${project.percent}%` }]} />
+              </View>
+              {projectDetail.notes ? (
+                <Text style={styles.projectNote}>{projectDetail.notes}</Text>
+              ) : null}
             </View>
-
-            <View style={styles.detailCard}>
               <View style={styles.sectionHeader}>
                 <Text style={styles.sectionTitle}>Avances</Text>
-                <Pressable onPress={() => setAvanceOpen(true)} style={styles.inlineIconButton}>
-                  <Ionicons name="add" size={17} color="#111" />
-                </Pressable>
+                <View style={styles.inlineActions}>
+                  <Text style={styles.taskMeta}>{projectDetail.avances.length}</Text>
+                  <Pressable onPress={() => setAvanceOpen(true)} style={styles.inlineIconButton}>
+                    <Ionicons name="add" size={17} color="#111" />
+                  </Pressable>
+                </View>
               </View>
               {projectDetail.avances.length === 0 ? (
                 <Text style={styles.stateText}>Sin avances recientes.</Text>
@@ -3228,50 +3516,8 @@ function TasksScreen({
                   </View>
                 ))
               )}
-            </View>
-          </>
+          </View>
         ) : null}
-
-        <ScrollView
-          contentContainerStyle={styles.tabsContent}
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.tabs}
-        >
-          {statusTabs.map((item) => (
-            <Pressable
-              key={item.key}
-              onPress={() => setStatusTab(item.key)}
-              style={[styles.tabButton, statusTab === item.key && styles.tabButtonActive]}
-            >
-              <Text style={[styles.tabText, statusTab === item.key && styles.tabTextActive]}>
-                {item.label}
-              </Text>
-              <Text style={[styles.tabCount, statusTab === item.key && styles.tabTextActive]}>
-                {item.count}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-
-        {result === undefined ? (
-          <View style={styles.stateCard}>
-            <ActivityIndicator color="#111" />
-            <Text style={styles.stateText}>Cargando tareas...</Text>
-          </View>
-        ) : filteredTasks.length === 0 ? (
-          <View style={styles.stateCard}>
-            <Ionicons name="checkbox-outline" size={34} color="#68707b" />
-            <Text style={styles.emptyTitle}>Sin tareas</Text>
-            <Text style={styles.stateText}>Crea una nueva tarea con el botón superior.</Text>
-          </View>
-        ) : (
-          <View style={styles.list}>
-            {filteredTasks.map((task) => (
-              <TaskRow key={task.id} onPress={() => setSelectedTaskId(task.id)} task={task} />
-            ))}
-          </View>
-        )}
       </ScrollView>
 
       <TaskDetailModal
@@ -3281,6 +3527,61 @@ function TasksScreen({
         taskId={selectedTaskId}
         user={user}
       />
+
+      <Modal animationType="slide" onRequestClose={() => setRenameOpen(false)} visible={renameOpen}>
+        <SafeAreaView style={styles.modalRoot}>
+          <View style={styles.modalHeader}>
+            <Pressable onPress={() => setRenameOpen(false)} style={styles.backButton}>
+              <Ionicons name="close" size={24} color="#111" />
+            </Pressable>
+            <Text style={styles.modalTitle}>Renombrar proyecto</Text>
+            <View style={styles.headerSpacer} />
+          </View>
+
+          <View style={styles.modalContent}>
+            <View style={styles.detailCard}>
+              <View style={styles.projectRenameHead}>
+                <ProjectIcon project={{ ...project, name: projectName }} />
+                <View style={styles.projectTitleBox}>
+                  <Text numberOfLines={1} style={styles.company}>{project.company}</Text>
+                  <Text numberOfLines={2} style={styles.taskTitle}>{projectName}</Text>
+                </View>
+              </View>
+              <View style={styles.field}>
+                <Text style={styles.label}>Nombre</Text>
+                <View style={styles.inputShell}>
+                  <Ionicons name="create-outline" size={19} color="#7a8088" />
+                  <TextInput
+                    autoCapitalize="sentences"
+                    onChangeText={setProjectNameDraft}
+                    placeholder="Nombre del proyecto"
+                    placeholderTextColor="#9aa0a8"
+                    style={styles.input}
+                    value={projectNameDraft}
+                  />
+                </View>
+              </View>
+              <Pressable
+                disabled={renaming}
+                onPress={saveProjectName}
+                style={({ pressed }) => [
+                  styles.primaryButton,
+                  (pressed || renaming) && styles.pressed,
+                ]}
+              >
+                {renaming ? (
+                  <ActivityIndicator color="#111" />
+                ) : (
+                  <>
+                    <Text style={styles.primaryText}>Guardar nombre</Text>
+                    <Ionicons name="checkmark" size={21} color="#111" />
+                  </>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </SafeAreaView>
+      </Modal>
 
       <Modal animationType="slide" onRequestClose={() => setAvanceOpen(false)} visible={avanceOpen}>
         <SafeAreaView style={styles.modalRoot}>
@@ -3369,11 +3670,19 @@ function TasksScreen({
 
           <ScrollView contentContainerStyle={styles.modalContent}>
             <TaskFormFields
+              attachments={newTaskAttachments}
+              attachmentsDisabled={saving}
               description={description}
               dueDate={dueDate}
               members={members}
               onDescriptionChange={setDescription}
               onDueDateChange={setDueDate}
+              onPickAttachments={pickNewTaskAttachments}
+              onRemoveAttachment={(index) =>
+                setNewTaskAttachments((current) =>
+                  current.filter((_, itemIndex) => itemIndex !== index),
+                )
+              }
               onOwnerIdsChange={setOwnerIds}
               onPhaseIndexChange={setPhaseIndex}
               onPriorityChange={setPriority}
@@ -4156,7 +4465,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#f7f7f5",
     borderColor: "#e6e2d6",
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     minHeight: 54,
@@ -4167,25 +4476,25 @@ const styles = StyleSheet.create({
   primaryButton: {
     alignItems: "center",
     backgroundColor: "#f6de39",
-    borderRadius: 14,
+    borderRadius: 8,
     flexDirection: "row",
     gap: 10,
     justifyContent: "center",
     minHeight: 54,
   },
   pressed: { opacity: 0.7 },
-  primaryText: { color: "#111", fontSize: 16, fontWeight: "900" },
+  primaryText: { color: "#111", fontSize: 16, fontWeight: "800" },
   dashboard: { backgroundColor: "#f6f5ef", flex: 1 },
   dashboardContent: { padding: 18, paddingBottom: 32 },
   header: { alignItems: "center", flexDirection: "row", justifyContent: "space-between", marginVertical: 12 },
   headerActions: { flexDirection: "row", gap: 8 },
-  hello: { color: "#111", fontSize: 26, fontWeight: "900" },
+  hello: { color: "#111", fontSize: 26, fontWeight: "800" },
   subhead: { color: "#65605a", fontSize: 15, marginTop: 3 },
   logout: {
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: 1,
     height: 46,
     justifyContent: "center",
@@ -4201,15 +4510,15 @@ const styles = StyleSheet.create({
     right: -3,
     top: -4,
   },
-  badgeText: { color: "#fff", fontSize: 10, fontWeight: "900" },
-  summary: { backgroundColor: "#111", borderRadius: 20, flexDirection: "row", marginBottom: 18, padding: 14 },
+  badgeText: { color: "#fff", fontSize: 10, fontWeight: "800" },
+  summary: { backgroundColor: "#111", borderRadius: 8, flexDirection: "row", marginBottom: 18, padding: 14 },
   summaryItem: { flex: 1, gap: 4 },
-  summaryValue: { color: "#f6de39", fontSize: 22, fontWeight: "900", textAlign: "center" },
+  summaryValue: { color: "#f6de39", fontSize: 22, fontWeight: "800", textAlign: "center" },
   summaryLabel: { color: "#ebe7d9", fontSize: 11, fontWeight: "700", textAlign: "center" },
   segmented: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 16,
+    borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     gap: 6,
@@ -4218,7 +4527,7 @@ const styles = StyleSheet.create({
   },
   segmentButton: {
     alignItems: "center",
-    borderRadius: 12,
+    borderRadius: 6,
     flex: 1,
     flexDirection: "row",
     gap: 6,
@@ -4226,14 +4535,14 @@ const styles = StyleSheet.create({
     minHeight: 40,
   },
   segmentButtonActive: { backgroundColor: "#111" },
-  segmentText: { color: "#475467", fontSize: 13, fontWeight: "900" },
+  segmentText: { color: "#475467", fontSize: 13, fontWeight: "700" },
   segmentTextActive: { color: "#fff" },
-  segmentCount: { color: "#667085", fontSize: 12, fontWeight: "900" },
+  segmentCount: { color: "#667085", fontSize: 12, fontWeight: "700" },
   searchShell: {
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 15,
+    borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     gap: 9,
@@ -4249,7 +4558,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     gap: 7,
@@ -4257,11 +4566,11 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
   },
   tabButtonActive: { backgroundColor: "#111", borderColor: "#111" },
-  tabText: { color: "#475467", fontSize: 13, fontWeight: "800" },
+  tabText: { color: "#475467", fontSize: 13, fontWeight: "700" },
   tabTextActive: { color: "#fff" },
-  tabCount: { color: "#667085", fontSize: 12, fontWeight: "900" },
-  stateCard: { alignItems: "center", backgroundColor: "#fff", borderRadius: 20, gap: 10, padding: 28 },
-  emptyTitle: { color: "#111", fontSize: 18, fontWeight: "900" },
+  tabCount: { color: "#667085", fontSize: 12, fontWeight: "700" },
+  stateCard: { alignItems: "center", backgroundColor: "#fff", borderRadius: 8, gap: 10, padding: 28 },
+  emptyTitle: { color: "#111", fontSize: 18, fontWeight: "800" },
   stateText: { color: "#667085", fontSize: 14, lineHeight: 20, textAlign: "center" },
   panelStack: { gap: 14 },
   list: { gap: 14 },
@@ -4277,10 +4586,10 @@ const styles = StyleSheet.create({
   projectOpenArea: { alignItems: "flex-start", flex: 1, flexDirection: "row", gap: 12, minWidth: 0 },
   projectIcon: { alignItems: "center", backgroundColor: "#f6de39", borderRadius: 8, height: 44, justifyContent: "center", overflow: "hidden", width: 44 },
   projectIconImage: { height: "100%", resizeMode: "cover", width: "100%" },
-  projectIconText: { color: "#111", fontSize: 20, fontWeight: "900" },
+  projectIconText: { color: "#111", fontSize: 20, fontWeight: "800" },
   projectTitleBox: { flex: 1, minWidth: 0 },
-  company: { color: "#7b7264", fontSize: 12, fontWeight: "800", marginBottom: 3 },
-  projectName: { color: "#111", fontSize: 18, fontWeight: "900", lineHeight: 22 },
+  company: { color: "#7b7264", fontSize: 12, fontWeight: "700", marginBottom: 3 },
+  projectName: { color: "#111", fontSize: 18, fontWeight: "800", lineHeight: 22 },
   projectCardActions: { alignItems: "center", flexDirection: "row", gap: 8 },
   favoriteBadge: {
     alignItems: "center",
@@ -4301,29 +4610,29 @@ const styles = StyleSheet.create({
     width: 32,
   },
   projectDetails: { gap: 12 },
-  chip: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
-  chipText: { fontSize: 12, fontWeight: "900" },
+  chip: { borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6 },
+  chipText: { fontSize: 12, fontWeight: "700" },
   phaseChip: {
     backgroundColor: "#f6de39",
-    borderRadius: 999,
+    borderRadius: 8,
     maxWidth: 126,
     paddingHorizontal: 10,
     paddingVertical: 6,
   },
-  phaseChipText: { color: "#111", fontSize: 12, fontWeight: "900" },
+  phaseChipText: { color: "#111", fontSize: 12, fontWeight: "800" },
   metaRow: { alignItems: "center", flexDirection: "row", gap: 8 },
   metaText: { color: "#475467", flex: 1, fontSize: 14, fontWeight: "700" },
   progressTop: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
-  progressLabel: { color: "#667085", fontSize: 13, fontWeight: "800" },
-  progressNumber: { color: "#111", fontSize: 14, fontWeight: "900" },
+  progressLabel: { color: "#667085", fontSize: 13, fontWeight: "700" },
+  progressNumber: { color: "#111", fontSize: 14, fontWeight: "800" },
   track: { backgroundColor: "#eee9dc", borderRadius: 999, height: 9, overflow: "hidden" },
   fill: { backgroundColor: "#f6de39", borderRadius: 999, height: 9 },
   metrics: { flexDirection: "row", gap: 8 },
-  metric: { backgroundColor: "#f8f7f2", borderRadius: 12, flex: 1, gap: 4, minHeight: 78, padding: 10 },
-  metricLabel: { color: "#667085", fontSize: 11, fontWeight: "800" },
-  metricValue: { color: "#111", fontSize: 13, fontWeight: "900" },
-  linkButton: { alignItems: "center", alignSelf: "flex-start", backgroundColor: "#f6de39", borderRadius: 12, flexDirection: "row", gap: 7, paddingHorizontal: 12, paddingVertical: 9 },
-  linkButtonText: { color: "#111", fontSize: 13, fontWeight: "900" },
+  metric: { backgroundColor: "#f8f7f2", borderRadius: 8, flex: 1, gap: 4, minHeight: 78, padding: 10 },
+  metricLabel: { color: "#667085", fontSize: 11, fontWeight: "700" },
+  metricValue: { color: "#111", fontSize: 13, fontWeight: "800" },
+  linkButton: { alignItems: "center", alignSelf: "flex-start", backgroundColor: "#f6de39", borderRadius: 8, flexDirection: "row", gap: 7, paddingHorizontal: 12, paddingVertical: 9 },
+  linkButtonText: { color: "#111", fontSize: 13, fontWeight: "800" },
   detailHeader: {
     alignItems: "center",
     flexDirection: "row",
@@ -4335,7 +4644,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: 1,
     height: 44,
     justifyContent: "center",
@@ -4344,29 +4653,50 @@ const styles = StyleSheet.create({
   addButton: {
     alignItems: "center",
     backgroundColor: "#f6de39",
-    borderRadius: 14,
+    borderRadius: 8,
     height: 44,
     justifyContent: "center",
     width: 44,
   },
   detailTitleBox: { flex: 1, minWidth: 0 },
-  detailTitle: { color: "#111", fontSize: 22, fontWeight: "900", lineHeight: 27 },
+  detailTitle: { color: "#111", fontSize: 22, fontWeight: "800", lineHeight: 27 },
   projectMini: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 18,
+    borderRadius: 8,
     borderWidth: 1,
-    gap: 10,
+    gap: 9,
     marginBottom: 14,
     padding: 16,
   },
-  projectMiniLabel: { color: "#667085", fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
-  projectMiniValue: { color: "#111", fontSize: 17, fontWeight: "900" },
+  projectSummaryTop: { alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between" },
+  projectMiniLabel: { color: "#667085", fontSize: 11, fontWeight: "700", textTransform: "uppercase" },
+  projectMiniValue: { color: "#111", fontSize: 17, fontWeight: "800" },
+  projectPercentPill: {
+    alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderColor: "#ece7da",
+    borderRadius: 8,
+    borderWidth: 1,
+    minWidth: 58,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  projectPercentText: { color: "#111", fontSize: 14, fontWeight: "800" },
+  projectTabs: { marginBottom: 14 },
+  projectTabCount: { color: "#667085", fontSize: 12, fontWeight: "700" },
+  taskSectionHeader: {
+    alignItems: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginBottom: 12,
+  },
+  projectRenameHead: { alignItems: "center", flexDirection: "row", gap: 12 },
   phaseList: { gap: 8 },
   phaseRow: {
     alignItems: "center",
     backgroundColor: "#f8f7f2",
-    borderRadius: 12,
+    borderRadius: 8,
     flexDirection: "row",
     gap: 10,
     padding: 10,
@@ -4375,7 +4705,7 @@ const styles = StyleSheet.create({
   taskRow: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 16,
+    borderRadius: 8,
     borderWidth: 1,
     gap: 10,
     padding: 14,
@@ -4383,35 +4713,35 @@ const styles = StyleSheet.create({
   taskRowTop: { alignItems: "flex-start", flexDirection: "row", gap: 10 },
   taskStatusDot: { borderRadius: 999, height: 10, marginTop: 7, width: 10 },
   taskTitleBox: { flex: 1, minWidth: 0 },
-  taskTitle: { color: "#111", fontSize: 16, fontWeight: "900", lineHeight: 20 },
+  taskTitle: { color: "#111", fontSize: 16, fontWeight: "800", lineHeight: 20 },
   taskDescription: { color: "#4f5865", fontSize: 13, lineHeight: 19 },
   taskFooter: { alignItems: "center", flexDirection: "row", gap: 12, justifyContent: "space-between" },
-  taskMeta: { color: "#667085", flexShrink: 1, fontSize: 12, fontWeight: "700" },
+  taskMeta: { color: "#667085", flexShrink: 1, fontSize: 12, fontWeight: "600" },
   detailCard: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 18,
+    borderRadius: 8,
     borderWidth: 1,
     gap: 12,
     padding: 16,
   },
-  detailTaskTitle: { color: "#111", fontSize: 22, fontWeight: "900", lineHeight: 27 },
+  detailTaskTitle: { color: "#111", fontSize: 22, fontWeight: "800", lineHeight: 27 },
   ticketCard: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 16,
+    borderRadius: 8,
     borderWidth: 1,
     gap: 12,
     padding: 14,
   },
   timerBox: {
     backgroundColor: "#f8f7f2",
-    borderRadius: 14,
+    borderRadius: 8,
     gap: 12,
     padding: 12,
   },
   inlineActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  bigNumber: { color: "#111", fontSize: 30, fontWeight: "900" },
+  bigNumber: { color: "#111", fontSize: 30, fontWeight: "800" },
   logRow: {
     alignItems: "center",
     borderBottomColor: "#ece7da",
@@ -4423,13 +4753,13 @@ const styles = StyleSheet.create({
   infoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   infoPill: {
     backgroundColor: "#f8f7f2",
-    borderRadius: 12,
+    borderRadius: 8,
     gap: 4,
     minHeight: 68,
     padding: 10,
     width: "48%",
   },
-  sectionTitle: { color: "#111", fontSize: 16, fontWeight: "900", marginTop: 4 },
+  sectionTitle: { color: "#111", fontSize: 16, fontWeight: "800", marginTop: 4 },
   sectionHeader: {
     alignItems: "center",
     flexDirection: "row",
@@ -4439,35 +4769,77 @@ const styles = StyleSheet.create({
   smallActionButton: {
     alignItems: "center",
     backgroundColor: "#f6de39",
-    borderRadius: 999,
+    borderRadius: 8,
     flexDirection: "row",
     gap: 6,
     minHeight: 34,
     paddingHorizontal: 11,
   },
-  smallActionText: { color: "#111", fontSize: 12, fontWeight: "900" },
+  smallActionText: { color: "#111", fontSize: 12, fontWeight: "800" },
   attachmentRow: {
     alignItems: "center",
     backgroundColor: "#f8f7f2",
-    borderRadius: 12,
+    borderRadius: 8,
     flexDirection: "row",
     gap: 8,
     minHeight: 44,
     paddingHorizontal: 10,
   },
-  attachmentName: { color: "#111", flex: 1, fontSize: 13, fontWeight: "800" },
-  attachmentMeta: { color: "#667085", fontSize: 11, fontWeight: "700" },
+  attachmentName: { color: "#111", flex: 1, fontSize: 13, fontWeight: "700" },
+  attachmentMeta: { color: "#667085", fontSize: 11, fontWeight: "600" },
   inlineIconButton: {
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: 1,
     height: 30,
     justifyContent: "center",
     width: 30,
   },
   inlineIconButtonActive: { backgroundColor: "#fff7c2", borderColor: "#111" },
+  infoList: { gap: 8 },
+  infoRow: {
+    alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderRadius: 8,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 50,
+    paddingHorizontal: 11,
+    paddingVertical: 10,
+  },
+  infoTitle: { color: "#111", flexShrink: 1, fontSize: 15, fontWeight: "800", lineHeight: 20 },
+  activeLabel: {
+    backgroundColor: "#111",
+    borderRadius: 6,
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+    overflow: "hidden",
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+  },
+  memberRow: {
+    alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderRadius: 8,
+    flexDirection: "row",
+    gap: 10,
+    minHeight: 54,
+    padding: 10,
+  },
+  memberAvatar: {
+    alignItems: "center",
+    backgroundColor: "#111",
+    borderRadius: 8,
+    height: 34,
+    justifyContent: "center",
+    width: 34,
+  },
+  memberInitial: { color: "#fff", fontSize: 14, fontWeight: "800" },
+  progressBlock: { gap: 9 },
+  projectNote: { color: "#4f5865", fontSize: 13, lineHeight: 19 },
   secondarySmallButton: {
     alignItems: "center",
     backgroundColor: "#fff",
@@ -4481,40 +4853,42 @@ const styles = StyleSheet.create({
   dropdownShell: {
     alignItems: "center",
     backgroundColor: "#fff",
-    borderColor: "#ece7da",
+    borderColor: "#e6e2d6",
     borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     gap: 10,
-    minHeight: 50,
-    paddingHorizontal: 12,
+    minHeight: 52,
+    paddingHorizontal: 13,
   },
-  dropdownValue: { color: "#111", flex: 1, fontSize: 14, fontWeight: "800" },
+  dropdownValue: { color: "#475467", flex: 1, fontSize: 15, fontWeight: "700" },
   dropdownClear: {
     alignItems: "center",
+    backgroundColor: "#f8f7f2",
+    borderRadius: 8,
     height: 28,
     justifyContent: "center",
     width: 28,
   },
   dropdownMenu: {
     backgroundColor: "#fff",
-    borderColor: "#ece7da",
+    borderColor: "#e6e2d6",
     borderRadius: 8,
     borderWidth: 1,
     gap: 4,
-    marginTop: 6,
+    marginTop: 8,
     padding: 6,
   },
   dropdownOption: {
     alignItems: "center",
-    borderRadius: 8,
+    borderRadius: 6,
     flexDirection: "row",
     gap: 8,
-    minHeight: 40,
+    minHeight: 42,
     paddingHorizontal: 10,
   },
   dropdownOptionActive: { backgroundColor: "#fff7c2" },
-  dropdownOptionText: { color: "#475467", flex: 1, fontSize: 13, fontWeight: "800" },
+  dropdownOptionText: { color: "#475467", flex: 1, fontSize: 14, fontWeight: "700" },
   dropdownOptionTextActive: { color: "#111" },
   projectTabsContent: { gap: 8, paddingRight: 6 },
   projectTabButton: {
@@ -4529,7 +4903,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 11,
   },
   projectTabButtonActive: { backgroundColor: "#f6de39", borderColor: "#111" },
-  projectTabText: { color: "#475467", fontSize: 13, fontWeight: "800" },
+  projectTabText: { color: "#475467", fontSize: 13, fontWeight: "700" },
   projectTabTextActive: { color: "#111" },
   projectIconPicker: {
     alignItems: "flex-start",
@@ -4550,7 +4924,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     width: 58,
   },
-  projectIconLargeText: { color: "#111", fontSize: 26, fontWeight: "900" },
+  projectIconLargeText: { color: "#111", fontSize: 26, fontWeight: "800" },
   projectIconPickerBody: { flex: 1, gap: 10, minWidth: 0 },
   iconSwatchGrid: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
   iconSwatch: {
@@ -4585,9 +4959,9 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     color: "#111",
-    fontSize: 13,
-    minHeight: 38,
-    paddingHorizontal: 10,
+    fontSize: 14,
+    minHeight: 42,
+    paddingHorizontal: 11,
   },
   secondaryButton: {
     alignItems: "center",
@@ -4598,39 +4972,44 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 8,
     justifyContent: "center",
-    minHeight: 44,
+    minHeight: 46,
     paddingHorizontal: 14,
   },
-  secondaryButtonText: { color: "#111", fontSize: 13, fontWeight: "900" },
-  modalFooter: { flexDirection: "row", gap: 10, marginTop: 4 },
+  secondaryButtonText: { color: "#111", fontSize: 14, fontWeight: "800" },
+  modalFooter: {
+    flexDirection: "row",
+    gap: 10,
+    justifyContent: "space-between",
+    marginTop: 4,
+  },
   modalSaveButton: { flex: 1 },
   commentBubble: {
     backgroundColor: "#f8f7f2",
-    borderRadius: 14,
+    borderRadius: 8,
     gap: 5,
     padding: 12,
   },
-  commentAuthor: { color: "#667085", fontSize: 12, fontWeight: "800" },
+  commentAuthor: { color: "#667085", fontSize: 12, fontWeight: "700" },
   commentText: { color: "#111", fontSize: 14, lineHeight: 20 },
   commentAttachmentList: { gap: 6, marginTop: 4 },
   commentAttachment: {
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 10,
+    borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     gap: 6,
     minHeight: 34,
     paddingHorizontal: 9,
   },
-  commentAttachmentText: { color: "#475467", flex: 1, fontSize: 12, fontWeight: "800" },
+  commentAttachmentText: { color: "#475467", flex: 1, fontSize: 12, fontWeight: "700" },
   selectedAttachments: { gap: 8, marginTop: 4 },
   selectedAttachment: {
     alignItems: "center",
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 12,
+    borderRadius: 8,
     borderWidth: 1,
     flexDirection: "row",
     gap: 8,
@@ -4647,7 +5026,7 @@ const styles = StyleSheet.create({
   commentInput: {
     backgroundColor: "#fff",
     borderColor: "#e6e2d6",
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: 1,
     color: "#111",
     flex: 1,
@@ -4659,7 +5038,7 @@ const styles = StyleSheet.create({
   sendButton: {
     alignItems: "center",
     backgroundColor: "#f6de39",
-    borderRadius: 14,
+    borderRadius: 8,
     height: 48,
     justifyContent: "center",
     width: 48,
@@ -4667,16 +5046,16 @@ const styles = StyleSheet.create({
   notificationCard: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 16,
+    borderRadius: 8,
     borderWidth: 1,
     gap: 8,
     padding: 14,
   },
   notificationUnread: { borderColor: "#f6de39", borderWidth: 2 },
   notificationTop: { alignItems: "flex-start", flexDirection: "row", gap: 8 },
-  notificationTitle: { color: "#111", flex: 1, fontSize: 16, fontWeight: "900", lineHeight: 20 },
+  notificationTitle: { color: "#111", flex: 1, fontSize: 16, fontWeight: "800", lineHeight: 20 },
   unreadDot: { backgroundColor: "#f04438", borderRadius: 999, height: 9, marginTop: 5, width: 9 },
-  notificationLink: { color: "#111", fontSize: 13, fontWeight: "900", marginTop: 2 },
+  notificationLink: { color: "#111", fontSize: 13, fontWeight: "800", marginTop: 2 },
   modalRoot: { backgroundColor: "#f6f5ef", flex: 1 },
   modalHeader: {
     alignItems: "center",
@@ -4685,13 +5064,13 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 12,
   },
-  modalTitle: { color: "#111", flex: 1, fontSize: 20, fontWeight: "900", textAlign: "center" },
+  modalTitle: { color: "#111", flex: 1, fontSize: 20, fontWeight: "800", textAlign: "center" },
   headerSpacer: { height: 44, width: 44 },
   modalContent: { gap: 18, padding: 18, paddingBottom: 34 },
   textarea: {
     backgroundColor: "#fff",
     borderColor: "#e6e2d6",
-    borderRadius: 14,
+    borderRadius: 8,
     borderWidth: 1,
     color: "#111",
     fontSize: 15,
@@ -4703,12 +5082,12 @@ const styles = StyleSheet.create({
   statusOption: {
     backgroundColor: "#fff",
     borderColor: "#ece7da",
-    borderRadius: 999,
+    borderRadius: 8,
     borderWidth: 1,
     paddingHorizontal: 13,
     paddingVertical: 10,
   },
   statusOptionActive: { backgroundColor: "#111", borderColor: "#111" },
-  statusOptionText: { color: "#475467", fontSize: 13, fontWeight: "800" },
+  statusOptionText: { color: "#475467", fontSize: 13, fontWeight: "700" },
   statusOptionTextActive: { color: "#fff" },
 });
